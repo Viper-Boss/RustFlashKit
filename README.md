@@ -4,7 +4,7 @@
 
 **MSM8916（骁龙 410 / UFI 棒子）Windows 刷机与模块配置工具**
 
-模块化刷写 · 固件导出备份 · 计划预览与二次确认 · 分区安全策略 · 纯标准库 · 可打包单文件 exe
+模块化刷写 · 固件导出备份 · 蓝牙（BLE）配置（实验） · 计划预览与二次确认 · 分区安全策略 · 可打包单文件 exe
 
 ![main](docs/screenshots/main-window.png)
 
@@ -22,6 +22,7 @@
 - [如何进入 Bootloader 模式](#如何进入-bootloader-模式)
 - [配置档案（Profile）](#配置档案profile)
 - [固件导出与备份](#固件导出与备份)
+- [蓝牙（BLE）配置（实验性）](#蓝牙ble配置实验性)
 - [安全机制](#安全机制)
 - [常见问题](#常见问题-faq)
 - [打包为 exe](#打包为-exe)
@@ -75,6 +76,7 @@ RustFlashKit 是一个运行在 **Windows** 上的图形化刷机工具，面向
 | 失败即停 | 任何一步失败不再执行后续步骤；执行中可随时取消 |
 | 设备管理 | adb/fastboot 双通道探测；系统模式一键重启进 Bootloader |
 | 固件导出/备份 | 读取设备分区表，adb 只读导出分区镜像，自动 SHA256，一键生成配置档案 |
+| 蓝牙配置（实验） | BLE 扫描/GATT 枚举诊断 + 模板化配网载荷发送骨架（固件协议定稿后改 JSON 模板即对接） |
 | 会话日志 | 窗口实时日志 + 文件存档，事后可追溯 |
 | 零依赖 | 仅 Python 标准库（tkinter）；PyInstaller 一键打包 |
 
@@ -170,6 +172,21 @@ JSON 格式，随文件所在目录作为镜像相对路径的基准。示例：
 - **Bootloader (fastboot) 模式没有标准的分区读取命令**，因此导出只在系统模式可用；fastboot 下只能写不能读。
 - 与刷写相反，**备份 EFS/IMEI 分区（modemst1/modemst2 等）是强烈推荐的操作**——刷坏前有一份备份，救得回来。若导出报 Permission denied，说明设备的 adbd 无 root 权限，需先刷入 root adbd 的系统再备份。
 
+## 蓝牙（BLE）配置（实验性）
+
+![ble](docs/screenshots/ble-dialog.png)
+
+入口：左侧「📶 蓝牙配置（实验）…」或 `工具 → 蓝牙（BLE）配置…`。
+
+**先说现状**：RustSimHub 的断网蓝牙配置（BLE 应急配网）在固件端**尚未实现**——`docs/ble/README.md`（2026-10-24）只是任务书：GATT UUID、分帧、加密会话（ECDH/HKDF/AEAD）、恢复公钥均"待实施"，固件仓库连 `crates/ble` 都还不存在；官方计划使用 Web Bluetooth 网页配置器（PWA）而非原生程序。因此在协议定稿前，不存在任何"能对上固件"的蓝牙配网工具，本工具也不假装能做到。
+
+在这个前提下，本窗口提供两件现在就有用、协议落地后立即可用的能力：
+
+1. **BLE 诊断**：扫描附近蓝牙设备（名称/地址/信号），双击连接并枚举 GATT 服务与特征——用于确认棒子的 BLE 广播/HCI/GATT 能力（对应任务书 B0 的板级能力矩阵，目前官方也缺这份证据）
+2. **模板化发送骨架**：服务/特征 UUID 与载荷字段存于 `config/ble-provisioning-template.json`（首次运行自动生成，UUID 默认为全零占位符并禁止发送）。固件协议定稿后，把真实 UUID 填进模板即可发送 Wi-Fi 配网载荷——无需改代码
+
+依赖：`pip install bleak`（可选依赖，未安装时窗口内提示；Windows 走系统自带 WinRT 后端，需要本机蓝牙适配器）。断网场景下蓝牙的作用是把 Wi-Fi 凭据送进棒子完成配网恢复，配置成功后仍然回到 adb/fastboot 管理通道。
+
 ## 安全机制
 
 刷错分区的代价差异极大，工具内置三道防线：
@@ -200,6 +217,9 @@ A：可以，但要先确认分区表：新建空白配置，按你的设备实�
 **Q：导出固件时报 Permission denied？**
 A：设备的 adbd 没有 root 权限，读不了块设备。这类棒子的原厂/第三方系统通常默认 root adbd；若确实没有，请先刷入带 root adbd 的系统再导出。
 
+**Q：蓝牙配网能直接用吗？**
+A：暂时不能——固件端 BLE 协议还没实现（见「蓝牙（BLE）配置（实验性）」一节）。当前可以扫描和枚举 GATT 做能力探测；等 RustSimHub 发布带 BLE 的固件后，在模板里填入真实 UUID 即可使用发送功能。
+
 **Q：和 RustSimHub 是什么关系？**
 A：相互独立的项目。RustSimHub 是设备端固件（Rust 通信系统），RustFlashKit 是通用刷写/配置前端，参考了其实测分区信息；RustSimHub 官方尚未发布通用刷机包，镜像请自行构建并提供。
 
@@ -210,11 +230,11 @@ A：相互独立的项目。RustSimHub 是设备端固件（Rust 通信系统）
 ## 开发与测试
 
 ```bash
-python -m unittest discover -s tests    # 41 项测试（含假 adb/fastboot 端到端刷机与导出流程）
+python -m unittest discover -s tests    # 50 项测试（含假 adb/fastboot 端到端刷机与导出流程）
 python -m rustflashkit                  # 启动 GUI
 ```
 
-测试覆盖：Profile 加载/校验/往返、分区安全策略（EFS 拒绝/引导链门槛/非法名）、计划生成（顺序/跳过/错误收集）、设备探测、执行器（成功流程/SHA256 拦截/失败即停/取消）、导出器（分区表解析/单分区导出/批量流/失败中止/取消）。GUI 无自动化测试，仅冒烟截图脚本（`tests/gui_smoke.py`、`make_screenshots.py`，需 Xvfb）。
+测试覆盖：Profile 加载/校验/往返、分区安全策略（EFS 拒绝/引导链门槛/非法名）、计划生成（顺序/跳过/错误收集）、设备探测、执行器（成功流程/SHA256 拦截/失败即停/取消）、导出器（分区表解析/单分区导出/批量流/失败中止/取消）、BLE 模板与载荷构建（纯逻辑）。GUI 无自动化测试，仅冒烟截图脚本（`tests/gui_smoke.py`、`make_screenshots.py`，需 Xvfb）。
 
 ## 项目结构
 
@@ -233,11 +253,13 @@ RustFlashKit/
 │   │   ├── safety.py    # 分区风险分级与强制校验
 │   │   ├── flasher.py   # 后台线程执行器（失败即停/可取消）
 │   │   ├── exporter.py  # 固件导出：分区表读取 + adb pull 批量备份
+│   │   ├── ble.py       # BLE 扫描/GATT 枚举/模板化配网发送（可选 bleak）
 │   │   └── config.py    # 设置与会话日志
 │   └── gui/
 │       ├── app.py       # 主窗口
 │       ├── dialogs.py   # 模块编辑器 / 计划预览 / 设置
 │       ├── export_dialog.py  # 固件导出（备份）对话框
+│       ├── ble_dialog.py     # 蓝牙（BLE）配置对话框
 │       └── theme.py     # 调色板与主题
 └── tests/               # 单元测试 + 假工具 + GUI 冒烟
 ```

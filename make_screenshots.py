@@ -65,6 +65,19 @@ elif which == "export":
         app.update(); time.sleep(0.04)
     dlg._read_table()
     dlg._select_preset()
+elif which == "ble":
+    from rustflashkit.gui.ble_dialog import BleDialog
+    dlg = BleDialog(app)
+    dlg.geometry("860x760+120+10")
+    print("DLG", hex(dlg.winfo_id()), file=sys.stderr)
+    for _ in range(15):
+        app.update(); time.sleep(0.04)
+    dlg.v_addr.set("RustSimHub-BLE [AA:BB:CC:DD:EE:FF]")
+    dlg.v_ssid.set("Home-WiFi")
+    dlg.v_psk.set("********")
+    dlg._log("→ 正在扫描 BLE 设备（6 秒）…")
+    dlg._log("✓ 发现 1 台设备", "ok")
+    dlg._log("★ RustSimHub-BLE  AA:BB:CC:DD:EE:FF  -58 dBm")
 
 print("APP", hex(app.winfo_id()), file=sys.stderr)
 end = time.time() + 50

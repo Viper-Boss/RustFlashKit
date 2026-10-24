@@ -1,2 +1,4 @@
-# 仅使用 Python 标准库（tkinter 随官方 Python 安装附带），无需第三方依赖。
-# 开发/打包可选：pyinstaller（见 build_exe.bat）
+# 核心功能仅使用 Python 标准库（tkinter 随官方 Python 安装附带）。
+# 蓝牙（BLE）配置功能为可选依赖，需要时安装：
+pip install bleak
+# 打包 exe 可选：pyinstaller（见 build_exe.bat）

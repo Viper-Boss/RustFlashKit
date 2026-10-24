@@ -31,8 +31,8 @@ class MainApp(tk.Tk):
         super().__init__()
         P = PALETTE
         self.title(f"{APP_NAME} — MSM8916 刷机与模块配置工具")
-        self.geometry("1120x780")
-        self.minsize(980, 660)
+        self.geometry("1120x820")
+        self.minsize(980, 680)
         self.configure(bg=P["bg"])
 
         self._init_fonts()
@@ -172,6 +172,7 @@ class MainApp(tk.Tk):
         tool_menu = tk.Menu(m, tearoff=False)
         tool_menu.add_command(label="设置 adb/fastboot 路径…", command=self.open_settings)
         tool_menu.add_command(label="固件导出（备份）…", command=self.open_export)
+        tool_menu.add_command(label="蓝牙（BLE）配置…", command=self.open_ble)
         tool_menu.add_command(label="打开日志目录", command=lambda: self._open_dir(app_root() / "logs"))
         tool_menu.add_command(label="打开配置目录", command=lambda: self._open_dir(app_root() / "config"))
         m.add_cascade(label="工具", menu=tool_menu)
@@ -245,7 +246,9 @@ class MainApp(tk.Tk):
                    command=self.reboot_to_bootloader).pack(fill="x", pady=2)
         ttk.Button(inner, text="⬇ 导出固件（备份）…", style="Tool.TButton",
                    command=self.open_export).pack(fill="x", pady=2)
-        self.btn_refresh, self.btn_to_bl, self.btn_export = inner.winfo_children()[-3:]
+        ttk.Button(inner, text="📶 蓝牙配置（实验）…", style="Tool.TButton",
+                   command=self.open_ble).pack(fill="x", pady=2)
+        self.btn_refresh, self.btn_to_bl, self.btn_export, self.btn_ble = inner.winfo_children()[-4:]
 
         ttk.Separator(inner, orient="horizontal").pack(fill="x", pady=10)
         ttk.Label(inner, text="刷机选项", style="Muted.TLabel").pack(anchor="w")
@@ -400,6 +403,10 @@ class MainApp(tk.Tk):
             return
         from rustflashkit.gui.export_dialog import ExportDialog
         ExportDialog(self)
+
+    def open_ble(self) -> None:
+        from rustflashkit.gui.ble_dialog import BleDialog
+        BleDialog(self)
 
     # ==================================================================
     # 配置档案
