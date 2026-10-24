@@ -1,24 +1,27 @@
-"""RustFlashKit 主窗口。
+"""RustFlashKit 主窗口 — 现代扁平主题。
 
-布局：顶部工具栏（配置档案） + 左侧（设备/选项/动作） + 右侧（模块表格 + 日志）。
+布局：深色顶栏（标题 + 设备徽章） → 工具栏 → 左侧卡片（设备/选项/动作）
++ 右侧卡片（模块表格 / 控制台式日志） → 状态栏。
 """
 from __future__ import annotations
 
 import queue
 import tkinter as tk
+import tkinter.font as tkfont
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Optional
 
 from rustflashkit import APP_NAME, __version__
 from rustflashkit.core.config import SessionLog, Settings
-from rustflashkit.core.device import DeviceService
+from rustflashkit.core.device import DeviceInfo, DeviceService
 from rustflashkit.core.flasher import FlashExecutor, StepResult
 from rustflashkit.core.modules import Profile
 from rustflashkit.core.plan import PlanOptions, build_plan
 from rustflashkit.core.runner import ToolLocator, ToolRunner, app_root
 from rustflashkit.gui.dialogs import (ModuleEditor, PlanPreviewDialog,
                                       SettingsDialog, show_about)
+from rustflashkit.gui.theme import PALETTE
 
 POLL_MS = 2000
 
@@ -26,9 +29,13 @@ POLL_MS = 2000
 class MainApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title(f"{APP_NAME} v{__version__} — MSM8916 刷机与模块配置工具")
-        self.geometry("1080x720")
-        self.minsize(920, 600)
+        P = PALETTE
+        self.title(f"{APP_NAME} — MSM8916 刷机与模块配置工具")
+        self.geometry("1120x740")
+        self.minsize(980, 640)
+        self.configure(bg=P["bg"])
+
+        self._init_fonts()
 
         self.settings = Settings.load()
         self.locator = ToolLocator(self.settings.adb_path, self.settings.fastboot_path)
@@ -42,13 +49,13 @@ class MainApp(tk.Tk):
         self.executor: Optional[FlashExecutor] = None
         self.session_log: Optional[SessionLog] = None
         self.ui_queue: "queue.Queue[tuple]" = queue.Queue()
-        self.flash_ui_steps: dict[int, str] = {}  # step index -> tree iid during exec
 
         self._build_style()
         self._build_menu()
+        self._build_header()
         self._build_toolbar()
+        self._build_statusbar()   # 先占用底部，避免被主内容挤出
         self._build_body()
-        self._build_statusbar()
 
         self.after(80, self._drain_queue)
         self.after(300, self._poll_device)
@@ -56,26 +63,99 @@ class MainApp(tk.Tk):
         self.log(f"{APP_NAME} v{__version__} 就绪。镜像文件由用户自行提供，刷机前请务必阅读 README 安全须知。")
 
     # ==================================================================
-    # UI 构建
+    # 字体与主题
     # ==================================================================
+    def _init_fonts(self) -> None:
+        is_win = self.tk.call("tk", "windowingsystem") == "win32"
+        families = set(tkfont.families(self))
+        if is_win:
+            ui = "Microsoft YaHei UI"
+            mono = "Consolas"
+        else:
+            ui = next((f for f in ("Noto Sans CJK SC", "Noto Sans CJK JP",
+                                   "WenQuanYi Micro Hei") if f in families),
+                      "TkDefaultFont")
+            mono = next((f for f in ("Noto Sans Mono CJK SC", "DejaVu Sans Mono")
+                         if f in families), "TkFixedFont")
+        self.f_ui = tkfont.Font(family=ui, size=10)
+        self.f_ui_bold = tkfont.Font(family=ui, size=10, weight="bold")
+        self.f_title = tkfont.Font(family=ui, size=14, weight="bold")
+        self.f_chip = tkfont.Font(family=ui, size=10, weight="bold")
+        self.f_mono = tkfont.Font(family=mono, size=9)
+
     def _build_style(self) -> None:
-        style = ttk.Style(self)
+        P = PALETTE
+        s = ttk.Style(self)
         try:
-            style.theme_use("clam")
+            s.theme_use("clam")
         except tk.TclError:
             pass
-        import tkinter.font as tkfont
-        family = "Microsoft YaHei UI" if self.tk.call("tk", "windowingsystem") == "win32" else "TkDefaultFont"
-        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
-            try:
-                f = tkfont.nametofont(name)
-                if family != "TkDefaultFont":
-                    f.configure(family=family, size=10)
-            except tk.TclError:
-                pass
-        style.configure("Flash.TButton", foreground="#b30000")
-        style.configure("Status.TLabel", padding=(6, 4))
 
+        s.configure(".", background=P["bg"], foreground=P["text"],
+                    borderwidth=0, font=self.f_ui)
+        s.configure("TFrame", background=P["bg"])
+        s.configure("Card.TFrame", background=P["card"])
+        s.configure("TLabel", background=P["bg"], foreground=P["text"])
+        s.configure("Card.TLabel", background=P["card"], foreground=P["text"])
+        s.configure("Muted.TLabel", background=P["card"], foreground=P["muted"])
+        s.configure("Title.TLabel", background=P["card"], foreground=P["text"],
+                    font=self.f_ui_bold)
+        s.configure("Section.TLabel", background=P["card"], foreground=P["muted"],
+                    font=self.f_ui_bold)
+
+        for name, bg, dark in (("Primary.TButton", P["accent"], P["accent_dark"]),
+                               ("Danger.TButton", P["danger"], P["danger_dark"]),
+                               ("Tool.TButton", P["card"], P["head_bg"])):
+            s.configure(name, background=bg, foreground=P["card"] if bg != P["card"] else P["text"],
+                        borderwidth=0, focuscolor=bg, padding=(12, 6))
+            s.map(name,
+                  background=[("disabled", bg), ("pressed", dark), ("active", dark)],
+                  foreground=[("disabled", P["disable_fg"])])
+
+        s.configure("ToolSmall.TButton", background=P["card"], foreground=P["text"],
+                    borderwidth=0, focuscolor=P["card"], padding=(8, 4))
+        s.map("ToolSmall.TButton",
+              background=[("disabled", P["card"]), ("pressed", P["head_bg"]),
+                          ("active", P["head_bg"])],
+              foreground=[("disabled", P["disable_fg"])])
+
+        s.configure("Treeview", background=P["card"], fieldbackground=P["card"],
+                    foreground=P["text"], rowheight=30, borderwidth=0)
+        s.configure("Treeview.Heading", background=P["head_bg"], foreground=P["muted"],
+                    relief="flat", borderwidth=0, padding=(8, 8))
+        s.map("Treeview.Heading", background=[("active", P["head_bg"])])
+        s.map("Treeview", background=[("selected", P["accent_soft"])],
+              foreground=[("selected", P["accent_dark"])])
+
+        s.configure("Vertical.TScrollbar", background=P["head_bg"], troughcolor=P["card"],
+                    bordercolor=P["card"], arrowcolor=P["muted"], relief="flat")
+        s.map("Vertical.TScrollbar", background=[("active", P["border"])])
+
+        s.configure("Accent.Horizontal.TProgressbar", troughcolor=P["head_bg"],
+                    background=P["accent"], borderwidth=0, thickness=8)
+
+        s.configure("TEntry", fieldbackground=P["card"], foreground=P["text"],
+                    bordercolor=P["border"], lightcolor=P["border"], darkcolor=P["border"],
+                    insertcolor=P["text"], padding=5)
+        s.map("TEntry", bordercolor=[("focus", P["accent"])],
+              lightcolor=[("focus", P["accent"])], darkcolor=[("focus", P["accent"])])
+        s.configure("TCombobox", fieldbackground=P["card"], foreground=P["text"],
+                    bordercolor=P["border"], lightcolor=P["border"], darkcolor=P["border"],
+                    arrowcolor=P["muted"], padding=4)
+        s.map("TCombobox", bordercolor=[("focus", P["accent"])])
+
+        s.configure("Card.TCheckbutton", background=P["card"], foreground=P["text"],
+                    focuscolor=P["card"], padding=(0, 3))
+        s.map("Card.TCheckbutton", background=[("active", P["card"])])
+
+        s.configure("Card.TLabelframe", background=P["card"], bordercolor=P["border"],
+                    relief="solid", borderwidth=1, padding=10)
+        s.configure("Card.TLabelframe.Label", background=P["bg"], foreground=P["muted"])
+        s.configure("TSeparator", background=P["border"])
+
+    # ==================================================================
+    # UI 构建
+    # ==================================================================
     def _build_menu(self) -> None:
         m = tk.Menu(self)
         file_menu = tk.Menu(m, tearoff=False)
@@ -101,135 +181,202 @@ class MainApp(tk.Tk):
         self.bind("<Control-o>", lambda e: self.open_profile())
         self.bind("<Control-s>", lambda e: self.save_profile())
 
+    def _build_header(self) -> None:
+        P = PALETTE
+        header = tk.Frame(self, bg=P["header"], height=58)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+
+        left = tk.Frame(header, bg=P["header"])
+        left.pack(side="left", padx=18)
+        tk.Label(left, text=f"⚡ {APP_NAME}", bg=P["header"], fg=P["header_fg"],
+                 font=self.f_title).pack(side="left")
+        tk.Label(left, text="MSM8916 刷机与模块配置工具", bg=P["header"],
+                 fg=P["header_sub"], font=self.f_ui).pack(side="left", padx=(12, 0), pady=(4, 0))
+
+        self.device_chip = tk.Label(header, text="  检测中…  ", bg=P["log_sb"],
+                                    fg=P["header_fg"], font=self.f_chip, padx=6)
+        self.device_chip.pack(side="right", padx=18, pady=14)
+
     def _build_toolbar(self) -> None:
-        bar = ttk.Frame(self, padding=(8, 6))
+        P = PALETTE
+        bar = ttk.Frame(self, padding=(14, 10))
         bar.pack(fill="x")
-        ttk.Label(bar, text="配置档案:").pack(side="left")
-        self.profile_var = tk.StringVar(value="（未加载）")
-        ttk.Label(bar, textvariable=self.profile_var, width=44, anchor="w",
-                  relief="groove", padding=(6, 3)).pack(side="left", padx=6)
-        ttk.Button(bar, text="打开…", command=self.open_profile).pack(side="left", padx=2)
-        ttk.Button(bar, text="保存", command=self.save_profile).pack(side="left", padx=2)
-        ttk.Button(bar, text="另存为…", command=self.save_profile_as).pack(side="left", padx=2)
-        ttk.Button(bar, text="新建", command=self.new_profile).pack(side="left", padx=2)
-        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=8)
-        ttk.Label(bar, text="镜像目录 = 配置文件所在目录").pack(side="left")
+        ttk.Label(bar, text="配置档案", style="TLabel").pack(side="left", padx=(0, 8))
+        box = tk.Frame(bar, bg=P["border"], highlightthickness=1,
+                       highlightbackground=P["border"])
+        box.pack(side="left")
+        self.profile_var = tk.StringVar(value="（未加载 — 文件→打开配置 或 新建）")
+        tk.Label(box, textvariable=self.profile_var, bg=P["card"], fg=P["text"],
+                 font=self.f_ui, padx=12, pady=5, width=42, anchor="w").pack()
+        for text, cmd in (("打开…", self.open_profile), ("保存", self.save_profile),
+                          ("另存为…", self.save_profile_as), ("新建", self.new_profile)):
+            ttk.Button(bar, text=text, style="Tool.TButton", command=cmd).pack(
+                side="left", padx=(8, 0))
+        ttk.Label(bar, text="镜像目录 = 配置文件目录", style="TLabel",
+                  foreground=P["muted"]).pack(side="left", padx=(16, 0))
 
     def _build_body(self) -> None:
-        body = ttk.Frame(self, padding=(8, 0))
+        P = PALETTE
+        body = ttk.Frame(self, padding=(14, 0))
         body.pack(fill="both", expand=True)
 
-        # ---------- 左侧面板 ----------
-        left = ttk.LabelFrame(body, text="设备与选项", padding=8)
-        left.pack(side="left", fill="y", padx=(0, 8))
+        # ---------- 左侧卡片 ----------
+        left = ttk.Labelframe(body, text="设备与选项", style="Card.TLabelframe")
+        left.pack(side="left", fill="y", padx=(0, 12), pady=(0, 2))
 
-        ttk.Label(left, text="当前设备").pack(anchor="w")
-        self.device_var = tk.StringVar(value="正在检测…")
-        self.device_label = ttk.Label(left, textvariable=self.device_var,
-                                      wraplength=210, foreground="#0a6")
-        self.device_label.pack(anchor="w", pady=(0, 6))
-        self.btn_refresh = ttk.Button(left, text="立即刷新", command=self._poll_device_now)
-        self.btn_refresh.pack(fill="x", pady=2)
-        self.btn_to_bl = ttk.Button(left, text="重启到 Bootloader",
-                                    command=self.reboot_to_bootloader)
-        self.btn_to_bl.pack(fill="x", pady=2)
+        inner = ttk.Frame(left, style="Card.TFrame")
+        inner.pack(fill="both", expand=True)
+        self._left_inner = inner
 
-        ttk.Separator(left, orient="horizontal").pack(fill="x", pady=8)
-        ttk.Label(left, text="刷机选项").pack(anchor="w")
+        ttk.Label(inner, text="当前设备", style="Muted.TLabel").pack(anchor="w")
+        self.device_chip2 = tk.Label(inner, text="检测中…", bg=P["log_sb"], fg=P["header_fg"],
+                                     font=self.f_chip, padx=10, pady=5)
+        self.device_chip2.pack(anchor="w", pady=(6, 4))
+        self.device_detail = tk.Label(inner, text="", bg=P["card"], fg=P["muted"],
+                                      font=self.f_ui, wraplength=200, justify="left")
+        self.device_detail.pack(anchor="w", pady=(0, 8))
+
+        ttk.Button(inner, text="立即刷新", style="Tool.TButton",
+                   command=self._poll_device_now).pack(fill="x", pady=2)
+        ttk.Button(inner, text="重启到 Bootloader", style="Tool.TButton",
+                   command=self.reboot_to_bootloader).pack(fill="x", pady=2)
+        self.btn_refresh, self.btn_to_bl = inner.winfo_children()[-2:]
+
+        ttk.Separator(inner, orient="horizontal").pack(fill="x", pady=10)
+        ttk.Label(inner, text="刷机选项", style="Muted.TLabel").pack(anchor="w")
         self.opt_reboot = tk.BooleanVar(value=self.settings.options.reboot_after)
-        ttk.Checkbutton(left, text="完成后重启设备", variable=self.opt_reboot).pack(anchor="w", pady=2)
+        ttk.Checkbutton(inner, text="完成后重启设备", style="Card.TCheckbutton",
+                        variable=self.opt_reboot).pack(anchor="w", pady=1)
         self.opt_sha = tk.BooleanVar(value=self.settings.options.verify_sha256)
-        ttk.Checkbutton(left, text="刷写前校验 SHA256（若配置）",
-                        variable=self.opt_sha).pack(anchor="w", pady=2)
+        ttk.Checkbutton(inner, text="刷写前校验 SHA256（若配置）", style="Card.TCheckbutton",
+                        variable=self.opt_sha).pack(anchor="w", pady=1)
 
-        ttk.Separator(left, orient="horizontal").pack(fill="x", pady=8)
-        self.tools_var = tk.StringVar(value="")
-        ttk.Label(left, textvariable=self.tools_var, wraplength=210,
-                  foreground="#666").pack(anchor="w", pady=(0, 6))
-        ttk.Button(left, text="设置工具路径…", command=self.open_settings).pack(fill="x")
+        ttk.Separator(inner, orient="horizontal").pack(fill="x", pady=10)
+        ttk.Label(inner, text="平台工具", style="Muted.TLabel").pack(anchor="w")
+        self.adb_lbl = tk.Label(inner, text="adb：检测中", bg=P["card"], fg=P["muted"],
+                                font=self.f_ui, anchor="w")
+        self.adb_lbl.pack(fill="x", pady=(4, 0))
+        self.fb_lbl = tk.Label(inner, text="fastboot：检测中", bg=P["card"], fg=P["muted"],
+                               font=self.f_ui, anchor="w")
+        self.fb_lbl.pack(fill="x")
+        self.btn_tools = ttk.Button(inner, text="设置工具路径…", style="Tool.TButton",
+                                    command=self.open_settings)
+        self.btn_tools.pack(fill="x", pady=(6, 0))
 
-        self.progress = ttk.Progressbar(left, mode="determinate")
-        self.progress.pack(fill="x", pady=(10, 4))
-        self.btn_preview = ttk.Button(left, text="① 生成预览", command=self.preview_plan)
-        self.btn_preview.pack(fill="x", pady=2)
-        self.btn_flash = ttk.Button(left, text="② 开始刷机…", style="Flash.TButton",
+        self.progress = ttk.Progressbar(inner, mode="determinate",
+                                        style="Accent.Horizontal.TProgressbar")
+        self.progress.pack(fill="x", pady=(14, 6))
+        self.btn_preview = ttk.Button(inner, text="① 生成预览", style="Primary.TButton",
+                                      command=self.preview_plan)
+        self.btn_preview.pack(fill="x", pady=3)
+        self.btn_flash = ttk.Button(inner, text="② 开始刷机…", style="Danger.TButton",
                                     command=self.start_flash)
-        self.btn_flash.pack(fill="x", pady=2)
-        self.btn_cancel = ttk.Button(left, text="取消执行", command=self.cancel_flash,
-                                     state="disabled")
-        self.btn_cancel.pack(fill="x", pady=2)
+        self.btn_flash.pack(fill="x", pady=3)
+        self.btn_cancel = ttk.Button(inner, text="取消执行", style="Tool.TButton",
+                                     command=self.cancel_flash, state="disabled")
+        self.btn_cancel.pack(fill="x", pady=3)
 
-        # ---------- 右侧：模块表 + 日志 ----------
+        # ---------- 右侧 ----------
         right = ttk.Frame(body)
         right.pack(side="left", fill="both", expand=True)
 
-        mod_frame = ttk.LabelFrame(right, text="模块（每行 = 一个分区；双击编辑）", padding=6)
-        mod_frame.pack(fill="both", expand=True)
+        mod_card = ttk.Labelframe(right, text="模块（每行 = 一个分区；双击编辑）",
+                                  style="Card.TLabelframe")
+        mod_card.pack(fill="both", expand=True)
         cols = ("name", "partition", "image", "status")
-        self.tree = ttk.Treeview(mod_frame, columns=cols, show="tree headings",
-                                 height=9, selectmode="browse")
+        self.tree = ttk.Treeview(mod_card, columns=cols, show="tree headings",
+                                 height=7, selectmode="browse", style="Treeview")
         self.tree.heading("#0", text="启用")
-        self.tree.column("#0", width=52, anchor="center", stretch=False)
+        self.tree.column("#0", width=56, anchor="center", stretch=False)
         self.tree.heading("name", text="模块名称")
         self.tree.column("name", width=150, anchor="w")
         self.tree.heading("partition", text="分区")
-        self.tree.column("partition", width=90, anchor="w")
+        self.tree.column("partition", width=100, anchor="w")
         self.tree.heading("image", text="镜像文件")
-        self.tree.column("image", width=250, anchor="w")
+        self.tree.column("image", width=270, anchor="w")
         self.tree.heading("status", text="状态")
-        self.tree.column("status", width=170, anchor="w")
-        vsb = ttk.Scrollbar(mod_frame, orient="vertical", command=self.tree.yview)
+        self.tree.column("status", width=190, anchor="w")
+        vsb = ttk.Scrollbar(mod_card, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="left", fill="y")
+        self.tree.pack(side="left", fill="both", expand=True, padx=(2, 0))
+        vsb.pack(side="left", fill="y", padx=(6, 2))
         self.tree.bind("<Button-1>", self._on_tree_click)
         self.tree.bind("<Double-1>", lambda e: self.edit_module())
         self.tree.bind("<space>", lambda e: self.toggle_selected())
-        self.tree.tag_configure("missing", foreground="#c00")
-        self.tree.tag_configure("danger", foreground="#b06000")
-        self.tree.tag_configure("disabled_row", foreground="#999")
+        self.tree.tag_configure("stripe", background=P["row_alt"])
+        self.tree.tag_configure("missing", foreground=P["danger"])
+        self.tree.tag_configure("danger", foreground=P["warn"])
+        self.tree.tag_configure("disabled_row", foreground="#9ca3af")
 
-        btns = ttk.Frame(mod_frame)
-        btns.pack(fill="x", pady=(6, 0))
-        for text, cmd in (("添加", self.add_module), ("编辑", self.edit_module),
-                          ("复制", self.duplicate_module), ("删除", self.delete_module),
-                          ("上移", lambda: self.move_module(-1)),
-                          ("下移", lambda: self.move_module(1))):
-            ttk.Button(btns, text=text, command=cmd, width=7).pack(side="left", padx=2)
+        btns = ttk.Frame(mod_card, style="Card.TFrame")
+        btns.pack(fill="x", pady=(8, 0))
+        for text, cmd in (("＋ 添加", self.add_module), ("✎ 编辑", self.edit_module),
+                          ("⧉ 复制", self.duplicate_module), ("✕ 删除", self.delete_module),
+                          ("↑ 上移", lambda: self.move_module(-1)),
+                          ("↓ 下移", lambda: self.move_module(1))):
+            ttk.Button(btns, text=text, style="ToolSmall.TButton", command=cmd,
+                       width=8).pack(side="left", padx=(0, 6))
         self._module_buttons = list(btns.winfo_children())
 
-        log_frame = ttk.LabelFrame(right, text="日志", padding=6)
-        log_frame.pack(fill="both", expand=True, pady=(8, 0))
-        import tkinter.scrolledtext as st
-        self.log_text = st.ScrolledText(log_frame, height=9, state="disabled",
-                                        font=("Consolas" if self.tk.call(
-                                            "tk", "windowingsystem") == "win32" else "Courier", 10))
-        self.log_text.pack(fill="both", expand=True)
-        for tag, color in (("err", "#c00"), ("warn", "#b06000"), ("ok", "#070")):
+        log_card = ttk.Labelframe(right, text="日志", style="Card.TLabelframe")
+        log_card.pack(fill="both", expand=True, pady=(12, 2))
+        log_wrap = tk.Frame(log_card, bg=P["log_bg"])
+        log_wrap.pack(fill="both", expand=True)
+        self.log_text = tk.Text(log_wrap, height=7, state="disabled", bd=0,
+                                bg=P["log_bg"], fg=P["log_fg"], font=self.f_mono,
+                                insertbackground=P["log_fg"], selectbackground="#334155",
+                                padx=10, pady=8, wrap="none")
+        sb = tk.Scrollbar(log_wrap, command=self.log_text.yview, bg=P["log_sb"],
+                          troughcolor=P["log_bg"], activebackground="#334155",
+                          bd=0, elementborderwidth=0, width=10)
+        self.log_text.configure(yscrollcommand=sb.set)
+        self.log_text.pack(side="left", fill="both", expand=True)
+        sb.pack(side="left", fill="y")
+        for tag, color in (("err", "#f87171"), ("warn", "#fbbf24"), ("ok", "#34d399")):
             self.log_text.tag_configure(tag, foreground=color)
 
     def _build_statusbar(self) -> None:
+        P = PALETTE
+        bar = tk.Frame(self, bg=P["card"], highlightbackground=P["border"],
+                       highlightthickness=1)
+        bar.pack(fill="x", side="bottom")
         self.status_var = tk.StringVar(value="就绪")
-        ttk.Label(self, textvariable=self.status_var, relief="sunken",
-                  style="Status.TLabel", anchor="w").pack(fill="x", side="bottom")
+        tk.Label(bar, textvariable=self.status_var, bg=P["card"], fg=P["muted"],
+                 font=self.f_ui, anchor="w", padx=14, pady=5).pack(fill="x")
 
     # ==================================================================
     # 设备轮询
     # ==================================================================
+    def _device_chip_colors(self, info: DeviceInfo) -> tuple[str, str]:
+        P = PALETTE
+        if info.mode == "bootloader":
+            return P["ok_soft"], P["ok_deep"]
+        if info.mode == "system":
+            return P["accent_soft"], "#1e40af"
+        if not (info.adb_found or info.fastboot_found):
+            return P["danger_soft"], "#991b1b"
+        return P["log_sb"], P["header_fg"]
+
     def _poll_device_now(self) -> None:
         self._poll_device()
 
     def _poll_device(self) -> None:
+        P = PALETTE
         if self.executor is None:  # 刷机中不轮询，避免干扰 fastboot
             info = self.device.probe()
-            color = {"bootloader": "#0a6", "system": "#06c", "none": "#888"}.get(info.mode, "#888")
-            if info.mode == "none" and not (info.adb_found or info.fastboot_found):
-                color = "#c00"
-            self.device_var.set(info.label)
-            self.device_label.configure(foreground=color)
-            self.tools_var.set(
-                f"adb: {'✓ ' + str(self.runner.tool_path('adb')) if info.adb_found else '✗ 未找到'}\n"
-                f"fastboot: {'✓ ' + str(self.runner.tool_path('fastboot')) if info.fastboot_found else '✗ 未找到'}")
+            chip_bg, chip_fg = self._device_chip_colors(info)
+            text = "⚠ 未找到 adb / fastboot 工具" if info.mode == "none" and \
+                not (info.adb_found or info.fastboot_found) else info.label
+            for chip in (self.device_chip, self.device_chip2):
+                chip.configure(text=f"  {text}  ", bg=chip_bg, fg=chip_fg)
+            self.device_detail.configure(text=info.detail or "等待设备接入")
+            self.adb_lbl.configure(
+                text=f"adb：{'✓ 已就绪' if info.adb_found else '✗ 未找到'}",
+                fg=P["ok"] if info.adb_found else "#9ca3af")
+            self.fb_lbl.configure(
+                text=f"fastboot：{'✓ 已就绪' if info.fastboot_found else '✗ 未找到'}",
+                fg=P["ok"] if info.fastboot_found else "#9ca3af")
         self.after(POLL_MS, self._poll_device)
 
     def reboot_to_bootloader(self) -> None:
@@ -318,9 +465,9 @@ class MainApp(tk.Tk):
         self.tree.delete(*self.tree.get_children())
         if self.profile is None:
             return
-        for mod in self.profile.modules:
+        from rustflashkit.core.safety import assess
+        for i, mod in enumerate(self.profile.modules):
             exists = mod.image_exists(self.base_dir)
-            from rustflashkit.core.safety import assess
             lvl = assess(mod.partition)
             marks = []
             if not mod.image.strip():
@@ -337,17 +484,21 @@ class MainApp(tk.Tk):
             elif lvl == "efs":
                 marks.append("⛔EFS·禁止")
             if marks:
-                status += " " + " ".join(marks)
+                status += "  " + " ".join(marks)
             check = "🔒" if mod.required else ("☑" if mod.enabled else "☐")
             tags = []
-            if lvl in ("bootloader", "efs") or (mod.image and not exists and not mod.allow_missing):
-                tags.append("danger" if lvl == "bootloader" else "missing")
+            if i % 2 == 1:
+                tags.append("stripe")
+            if lvl == "bootloader":
+                tags.append("danger")
+            elif lvl == "efs" or (mod.image and not exists and not mod.allow_missing):
+                tags.append("missing")
             if not mod.enabled:
                 tags.append("disabled_row")
             self.tree.insert("", "end", iid=mod.id,
                              text=check, values=(mod.name, mod.partition,
                                                  mod.image or "—", status),
-                             tags=tags or ())
+                             tags=tuple(tags))
 
     def _selected_id(self) -> Optional[str]:
         sel = self.tree.selection()
@@ -456,9 +607,7 @@ class MainApp(tk.Tk):
                            verify_sha256=self.opt_sha.get())
 
     def _build_plan_safe(self):
-        opts = self._plan_options()
-        plan = build_plan(self.profile, self.base_dir, opts)
-        return plan
+        return build_plan(self.profile, self.base_dir, self._plan_options())
 
     def preview_plan(self) -> None:
         if not self._require_profile():
@@ -505,7 +654,6 @@ class MainApp(tk.Tk):
         self.session_log.start()
         self._set_flashing(True)
         self.progress.configure(maximum=len(plan.steps), value=0)
-        self.flash_ui_steps.clear()
         self.executor = FlashExecutor(
             plan, self.runner, self.device,
             on_log=lambda line: self.ui_queue.put(("log", line)),
@@ -520,7 +668,7 @@ class MainApp(tk.Tk):
     def _set_flashing(self, flashing: bool) -> None:
         state = "disabled" if flashing else "normal"
         for b in [self.btn_preview, self.btn_flash, self.btn_refresh, self.btn_to_bl,
-                  *self._module_buttons]:
+                  self.btn_tools, *self._module_buttons]:
             b.configure(state=state)
         self.tree.configure(selectmode="none" if flashing else "browse")
         self.btn_cancel.configure(state="normal" if flashing else "disabled")

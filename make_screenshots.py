@@ -12,7 +12,12 @@ sys.path.insert(0, str(ROOT))
 
 # 假工具 → 设备面板显示 "Bootloader 模式 · TESTSERIAL"
 sys.path.insert(0, str(ROOT / "tests"))
-os.environ["PATH"] = f"{ROOT / '.fake_tools'}:" + os.environ["PATH"]
+from fakes import make_fake_tools                      # noqa: E402
+
+ftdir = ROOT / ".fake_tools"
+ftdir.mkdir(exist_ok=True)
+make_fake_tools(ftdir.resolve())
+os.environ["PATH"] = f"{ftdir.resolve()}:" + os.environ["PATH"]
 
 from rustflashkit.gui.app import MainApp                    # noqa: E402
 from rustflashkit.core.plan import PlanOptions, build_plan  # noqa: E402
@@ -28,7 +33,7 @@ for name, size in {"boot.img": 6 * 1024 * 1024,
         fh.truncate(size)
 
 app = MainApp()
-app.geometry("1080x720+20+20")
+app.geometry("1120x740+20+20")
 app._apply_profile(ROOT / "profiles" / "ufi003_rustsimhub.json")
 app.profile.modules[2].enabled = True   # NSHSTATE 也勾上，表格更丰满
 app.refresh_modules()
@@ -40,7 +45,7 @@ dlg = None
 if which == "preview":
     plan = build_plan(app.profile, app.base_dir, PlanOptions())
     dlg = PlanPreviewDialog(app, plan)
-    dlg.geometry("760x600+180+40")
+    dlg.geometry("760x700+180+20")
     print("DLG", hex(dlg.winfo_id()), file=sys.stderr)
 elif which == "editor":
     dlg = ModuleEditor(app, module=app.profile.modules[0],

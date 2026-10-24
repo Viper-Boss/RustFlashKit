@@ -1,7 +1,11 @@
-"""对话框：模块编辑器、刷机计划预览与确认、工具路径设置、关于。"""
+"""对话框：模块编辑器、刷机计划预览与确认、工具路径设置、关于。
+
+沿用主窗口主题（rustflashkit.gui.theme.PALETTE + 父窗口字体对象）。
+"""
 from __future__ import annotations
 
 import tkinter as tk
+import tkinter.font as tkfont
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Optional
@@ -10,9 +14,17 @@ from rustflashkit import APP_NAME, __version__
 from rustflashkit.core.config import Settings
 from rustflashkit.core.modules import COMMON_PARTITIONS, FlashModule
 from rustflashkit.core.plan import FlashPlan
+from rustflashkit.gui.theme import PALETTE as P
 
 CONFIRM_WORD_BL = "确认引导链"
 FIELD_W = 46  # 表单控件统一宽度
+
+
+def _fonts(parent):
+    """从主窗口取字体；独立运行时回退默认。"""
+    return (getattr(parent, "f_ui", None) or tkfont.nametofont("TkDefaultFont"),
+            getattr(parent, "f_mono", None) or tkfont.nametofont("TkFixedFont"),
+            getattr(parent, "f_ui_bold", None) or tkfont.nametofont("TkDefaultFont"))
 
 
 class ModalDialog(tk.Toplevel):
@@ -23,8 +35,22 @@ class ModalDialog(tk.Toplevel):
         self.transient(parent)
         self.grab_set()
         self.result: Optional[FlashModule] = None
-        self.frame = ttk.Frame(self, padding=12)
+        self.configure(bg=P["card"])
+        self.f_ui, self.f_mono, self.f_bold = _fonts(parent)
+        self.frame = ttk.Frame(self, style="Card.TFrame", padding=16)
         self.frame.pack(fill="both", expand=True)
+        s = ttk.Style(self)
+        s.configure("Inset.TLabelframe", background=P["card"], bordercolor=P["border"],
+                    relief="solid", borderwidth=1, padding=8)
+        s.configure("Inset.TLabelframe.Label", background=P["card"], foreground=P["muted"])
+
+    def buttons_row(self, ok_text: str, on_ok: Callable[[], None]) -> ttk.Frame:
+        btns = ttk.Frame(self.frame, style="Card.TFrame")
+        ttk.Button(btns, text="取消", style="Tool.TButton",
+                   command=self.destroy).pack(side="right", padx=4)
+        ttk.Button(btns, text=ok_text, style="Primary.TButton",
+                   command=on_ok).pack(side="right", padx=4)
+        return btns
 
 
 # ======================================================================
@@ -49,52 +75,60 @@ class ModuleEditor(ModalDialog):
         self.v_sha = tk.StringVar(value=m.sha256)
 
         def row(r: int, label: str, widget):
-            ttk.Label(frm, text=label).grid(row=r, column=0, sticky="w", pady=3, padx=(0, 8))
-            widget.grid(row=r, column=1, columnspan=2, sticky="we", pady=3)
+            ttk.Label(frm, text=label, style="Muted.TLabel").grid(
+                row=r, column=0, sticky="w", pady=4, padx=(0, 10))
+            widget.grid(row=r, column=1, columnspan=2, sticky="we", pady=4)
             return widget
 
-        row(0, "模块 ID*", ttk.Entry(frm, textvariable=self.v_id, width=FIELD_W, state=(
+        row(0, "模块 ID *", ttk.Entry(frm, textvariable=self.v_id, width=FIELD_W, state=(
             "disabled" if self.editing else "normal")))
-        row(1, "模块名称*", ttk.Entry(frm, textvariable=self.v_name, width=FIELD_W))
-        row(2, "分区名*", ttk.Combobox(frm, textvariable=self.v_part, width=FIELD_W - 2,
-                                       values=COMMON_PARTITIONS))
+        row(1, "模块名称 *", ttk.Entry(frm, textvariable=self.v_name, width=FIELD_W))
+        row(2, "分区名 *", ttk.Combobox(frm, textvariable=self.v_part, width=FIELD_W - 2,
+                                        values=COMMON_PARTITIONS))
 
-        img_frm = ttk.Frame(frm)
+        img_frm = ttk.Frame(frm, style="Card.TFrame")
         ttk.Entry(img_frm, textvariable=self.v_img).pack(side="left", fill="x", expand=True)
-        ttk.Button(img_frm, text="浏览…", command=self._browse_image, width=8).pack(side="left", padx=(6, 0))
-        row(3, "镜像文件*", img_frm)
+        ttk.Button(img_frm, text="浏览…", style="ToolSmall.TButton", width=7,
+                   command=self._browse_image).pack(side="left", padx=(6, 0))
+        row(3, "镜像文件 *", img_frm)
         row(4, "说明", ttk.Entry(frm, textvariable=self.v_desc, width=FIELD_W))
 
-        sha_frm = ttk.Frame(frm)
+        sha_frm = ttk.Frame(frm, style="Card.TFrame")
         ttk.Entry(sha_frm, textvariable=self.v_sha).pack(side="left", fill="x", expand=True)
-        ttk.Button(sha_frm, text="计算…", command=self._compute_sha, width=8).pack(side="left", padx=(6, 0))
-        row(5, "SHA256 (可选)", sha_frm)
+        ttk.Button(sha_frm, text="计算…", style="ToolSmall.TButton", width=7,
+                   command=self._compute_sha).pack(side="left", padx=(6, 0))
+        row(5, "SHA256（可选）", sha_frm)
 
-        opt = ttk.LabelFrame(frm, text="选项", padding=8)
-        opt.grid(row=6, column=0, columnspan=3, sticky="we", pady=(8, 4))
+        opt = ttk.Labelframe(frm, text=" 选项 ", style="Inset.TLabelframe")
+        opt.grid(row=6, column=0, columnspan=3, sticky="we", pady=(10, 4))
         self.v_enabled = tk.BooleanVar(value=m.enabled)
         self.v_required = tk.BooleanVar(value=m.required)
         self.v_allow_missing = tk.BooleanVar(value=m.allow_missing)
         self.v_allow_bl = tk.BooleanVar(value=m.allow_bootloader)
-        ttk.Checkbutton(opt, text="启用（参与刷写）", variable=self.v_enabled).grid(row=0, column=0, sticky="w")
-        ttk.Checkbutton(opt, text="必需（不可停用）", variable=self.v_required).grid(row=0, column=1, sticky="w")
-        ttk.Checkbutton(opt, text="镜像缺失时跳过", variable=self.v_allow_missing).grid(row=1, column=0, sticky="w")
-        ttk.Checkbutton(opt, text="允许引导链分区（高危）", variable=self.v_allow_bl).grid(row=1, column=1, sticky="w")
-        ttk.Label(opt, text="flash 超时(秒)").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(opt, text="启用（参与刷写）", style="Card.TCheckbutton",
+                        variable=self.v_enabled).grid(row=0, column=0, sticky="w", padx=4)
+        ttk.Checkbutton(opt, text="必需（不可停用）", style="Card.TCheckbutton",
+                        variable=self.v_required).grid(row=0, column=1, sticky="w", padx=4)
+        ttk.Checkbutton(opt, text="镜像缺失时跳过", style="Card.TCheckbutton",
+                        variable=self.v_allow_missing).grid(row=1, column=0, sticky="w", padx=4)
+        ttk.Checkbutton(opt, text="允许引导链分区（高危）", style="Card.TCheckbutton",
+                        variable=self.v_allow_bl).grid(row=1, column=1, sticky="w", padx=4)
+        ttk.Label(opt, text="flash 超时(秒)", style="Muted.TLabel").grid(
+            row=2, column=0, sticky="w", padx=4, pady=(8, 0))
         self.v_timeout = tk.IntVar(value=m.timeout)
-        ttk.Spinbox(opt, from_=30, to=3600, increment=30, textvariable=self.v_timeout, width=8).grid(
-            row=2, column=1, sticky="w", pady=(6, 0))
-        ttk.Label(opt, text="刷后等待(秒)").grid(row=3, column=0, sticky="w")
+        ttk.Spinbox(opt, from_=30, to=3600, increment=30, textvariable=self.v_timeout,
+                    width=8).grid(row=2, column=1, sticky="w", pady=(8, 0))
+        ttk.Label(opt, text="刷后等待(秒)", style="Muted.TLabel").grid(
+            row=3, column=0, sticky="w", padx=4)
         self.v_delay = tk.DoubleVar(value=m.post_delay)
-        ttk.Spinbox(opt, from_=0, to=30, increment=0.5, textvariable=self.v_delay, width=8).grid(
-            row=3, column=1, sticky="w")
+        ttk.Spinbox(opt, from_=0, to=30, increment=0.5, textvariable=self.v_delay,
+                    width=8).grid(row=3, column=1, sticky="w")
 
-        btns = ttk.Frame(frm)
-        btns.grid(row=7, column=0, columnspan=3, sticky="e", pady=(10, 0))
-        ttk.Button(btns, text="取消", command=self.destroy).pack(side="right", padx=4)
-        ttk.Button(btns, text="确定", command=self._on_ok).pack(side="right", padx=4)
+        btns = self.buttons_row("保存", self._on_ok)
+        btns.grid(row=7, column=0, columnspan=3, sticky="e", pady=(14, 0))
         ttk.Label(frm, text="* 必填；镜像路径可写相对路径（相对配置文件目录）",
-                  foreground="#666").grid(row=8, column=0, columnspan=3, sticky="w", pady=(6, 0))
+                  style="Muted.TLabel").grid(row=8, column=0, columnspan=3,
+                                             sticky="w", pady=(8, 0))
         frm.columnconfigure(1, weight=1)
 
     # ------------------------------------------------------------------
@@ -166,63 +200,80 @@ class PlanPreviewDialog(tk.Toplevel):
         self.grab_set()
         self.plan = plan
         self.confirmed = False
-        self.geometry("720x560")
+        self.configure(bg=P["card"])
+        f_ui, f_mono, f_bold = _fonts(parent)
 
-        head = ttk.Frame(self, padding=(12, 10))
-        head.pack(fill="x")
-        ttk.Label(head, text="执行以下操作前请逐条确认：", font=("", 11, "bold")).pack(anchor="w")
-        summary = tk.Text(head, height=4, wrap="word", bd=0, bg=self.cget("bg"))
-        summary.pack(fill="x", pady=(4, 0))
+        wrap = ttk.Frame(self, style="Card.TFrame", padding=(16, 14))
+        wrap.pack(fill="both", expand=True)
+
+        ttk.Label(wrap, text="执行以下操作前请逐条确认", style="Title.TLabel").pack(anchor="w")
+        summary = tk.Text(wrap, height=4, wrap="word", bd=0, bg=P["warn_soft"],
+                          fg=P["text"], font=f_ui, padx=12, pady=8, highlightthickness=0)
+        summary.pack(fill="x", pady=(8, 10))
         for line in plan.summary_lines():
-            summary.insert("end", line + "\n", "warn" if ("⚠" in line or "‼" in line) else "norm")
-        summary.tag_configure("warn", foreground="#b06000")
-        summary.tag_configure("norm", foreground="#333")
+            summary.insert("end", line + "\n",
+                           "err" if "‼" in line else ("warn" if "⚠" in line else "norm"))
+        summary.tag_configure("warn", foreground=P["warn"])
+        summary.tag_configure("err", foreground=P["danger"])
+        summary.tag_configure("norm", foreground=P["muted"])
         summary.configure(state="disabled")
 
-        import tkinter.scrolledtext as st
-        body = st.ScrolledText(self, font=("Consolas", 10))
-        body.pack(fill="both", expand=True, padx=12)
-        for i, step in enumerate(plan.steps, 1):
-            danger_mark = "  ⚠" if step.danger == "bootloader" else ""
-            body.insert("end", f"{i:2d}. {step.title}{danger_mark}\n",
-                        "danger" if step.danger else "step")
-            body.insert("end", f"    $ {step.command_repr()}\n", "cmd")
-        body.tag_configure("step", foreground="#111")
-        body.tag_configure("cmd", foreground="#045")
-        body.tag_configure("danger", foreground="#b06000", font=("Consolas", 10, "bold"))
+        console = tk.Frame(wrap, bg=P["log_bg"])
+        console.pack(fill="both", expand=True)
+        body = tk.Text(console, font=f_mono, bd=0, bg=P["log_bg"], fg=P["log_fg"],
+                       padx=14, pady=10, highlightthickness=0, wrap="none",
+                       height=13, insertbackground=P["log_fg"], selectbackground="#334155")
+        sb = tk.Scrollbar(console, command=body.yview, bg=P["log_sb"], troughcolor=P["log_bg"],
+                          activebackground="#334155", bd=0, elementborderwidth=0, width=10)
+        body.configure(yscrollcommand=sb.set)
+        body.pack(side="left", fill="both", expand=True)
+        sb.pack(side="left", fill="y")
+        if plan.steps:
+            for i, step in enumerate(plan.steps, 1):
+                mark = "  ⚠" if step.danger == "bootloader" else ""
+                body.insert("end", f"{i:2d}. {step.title}{mark}\n",
+                            "danger" if step.danger else "step")
+                body.insert("end", f"    $ {step.command_repr()}\n", "cmd")
+        else:
+            body.insert("end", "（无步骤）\n", "step")
+        body.tag_configure("step", foreground=P["log_fg"])
+        body.tag_configure("cmd", foreground=P["cmd"])
+        body.tag_configure("danger", foreground="#fbbf24", font=(f_mono.actual("family"), 9, "bold"))
         body.configure(state="disabled")
 
-        foot = ttk.Frame(self, padding=(12, 10))
-        foot.pack(fill="x")
+        foot = ttk.Frame(wrap, style="Card.TFrame")
+        foot.pack(fill="x", pady=(12, 0))
         self.v_ack = tk.BooleanVar(value=False)
         self.ack = ttk.Checkbutton(
             foot, text="我已逐条核对以上命令，确认镜像来源可信、分区无误，理解刷机可能变砖",
-            variable=self.v_ack, command=self._update_state)
+            style="Card.TCheckbutton", variable=self.v_ack, command=self._update_state)
         self.ack.pack(anchor="w")
 
-        self.danger_row = ttk.Frame(foot)
-        self.danger_row.pack(anchor="w", pady=(6, 0))
-        ttk.Label(self.danger_row,
+        self.danger_row = ttk.Frame(foot, style="Card.TFrame")
+        self.danger_row.pack(anchor="w", pady=(8, 0))
+        ttk.Label(self.danger_row, style="Muted.TLabel",
                   text=f"⚠ 含引导链分区，需输入「{CONFIRM_WORD_BL}」：").pack(side="left")
         self.v_confirm_word = tk.StringVar()
-        self.word_entry = ttk.Entry(self.danger_row, textvariable=self.v_confirm_word, width=12)
-        self.word_entry.pack(side="left", padx=4)
+        self.word_entry = ttk.Entry(self.danger_row, textvariable=self.v_confirm_word,
+                                    width=12)
+        self.word_entry.pack(side="left", padx=6)
         self.word_entry.bind("<KeyRelease>", lambda e: self._update_state())
-        has_danger = bool(plan.danger_partitions())
-        if not has_danger:
+        if not plan.danger_partitions():
             self.danger_row.pack_forget()
 
         if not plan.ok:
             ttk.Label(foot, text="‼ 计划存在错误，不能执行（见上方汇总）",
-                      foreground="#c00").pack(anchor="w", pady=(4, 0))
+                      foreground=P["danger"]).pack(anchor="w", pady=(6, 0))
 
-        btns = ttk.Frame(foot)
-        btns.pack(fill="x", pady=(8, 0))
-        ttk.Button(btns, text="取消", command=self.destroy).pack(side="right", padx=4)
-        self.btn_go = ttk.Button(btns, text="确认执行", style="Flash.TButton",
+        btns = ttk.Frame(foot, style="Card.TFrame")
+        btns.pack(fill="x", pady=(10, 0))
+        ttk.Button(btns, text="取消", style="Tool.TButton",
+                   command=self.destroy).pack(side="right", padx=4)
+        self.btn_go = ttk.Button(btns, text="确认执行", style="Danger.TButton",
                                  command=self._on_go, state="disabled")
         self.btn_go.pack(side="right", padx=4)
         self._update_state()
+        self.bind("<Escape>", lambda e: self.destroy())
 
     def _update_state(self) -> None:
         ok = self.plan.ok and self.v_ack.get()
@@ -241,31 +292,32 @@ class PlanPreviewDialog(tk.Toplevel):
 class SettingsDialog(ModalDialog):
     def __init__(self, parent, settings: Settings, on_saved: Callable[[], None] = lambda: None):
         super().__init__(parent, "设置")
+        self.title("设置 — adb / fastboot 路径")
         self.settings = settings
         self.on_saved = on_saved
         frm = self.frame
         self.v_adb = tk.StringVar(value=settings.adb_path)
         self.v_fb = tk.StringVar(value=settings.fastboot_path)
 
-        ttk.Label(frm, text="提示：留空则依次查找 应用目录/tools/、系统 PATH。", foreground="#666").grid(
-            row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        ttk.Label(frm, text="提示：留空则依次查找 应用目录/tools/、系统 PATH。",
+                  style="Muted.TLabel").grid(row=0, column=0, columnspan=3,
+                                             sticky="w", pady=(0, 10))
 
         def tool_row(r: int, label: str, var: tk.StringVar):
-            ttk.Label(frm, text=label).grid(row=r, column=0, sticky="w", pady=4, padx=(0, 8))
-            ttk.Entry(frm, textvariable=var).grid(row=r, column=1, sticky="we", pady=4)
-            ttk.Button(frm, text="浏览…", width=8,
+            ttk.Label(frm, text=label, style="Muted.TLabel").grid(
+                row=r, column=0, sticky="w", pady=5, padx=(0, 10))
+            ttk.Entry(frm, textvariable=var, width=44).grid(row=r, column=1, sticky="we", pady=5)
+            ttk.Button(frm, text="浏览…", style="ToolSmall.TButton", width=7,
                        command=lambda: self._pick(var)).grid(row=r, column=2, padx=4)
 
         tool_row(1, "adb 路径", self.v_adb)
         tool_row(2, "fastboot 路径", self.v_fb)
-        ttk.Label(frm, foreground="#666",
+        ttk.Label(frm, style="Muted.TLabel",
                   text="下载 platform-tools: https://developer.android.com/tools/releases/platform-tools").grid(
-            row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
+            row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
-        btns = ttk.Frame(frm)
-        btns.grid(row=4, column=0, columnspan=3, sticky="e", pady=(12, 0))
-        ttk.Button(btns, text="取消", command=self.destroy).pack(side="right", padx=4)
-        ttk.Button(btns, text="保存", command=self._save).pack(side="right", padx=4)
+        btns = self.buttons_row("保存", self._save)
+        btns.grid(row=4, column=0, columnspan=3, sticky="e", pady=(14, 0))
         frm.columnconfigure(1, weight=1)
 
     def _pick(self, var: tk.StringVar) -> None:
@@ -291,12 +343,15 @@ def ask_profile_name(parent) -> str:
     dlg.transient(parent)
     dlg.grab_set()
     dlg.resizable(False, False)
-    frm = ttk.Frame(dlg, padding=14)
+    dlg.configure(bg=P["card"])
+    f_ui, _, _ = _fonts(parent)
+    frm = ttk.Frame(dlg, style="Card.TFrame", padding=16)
     frm.pack()
-    ttk.Label(frm, text="配置名称:").grid(row=0, column=0, pady=6)
+    ttk.Label(frm, text="配置名称", style="Muted.TLabel").grid(row=0, column=0, pady=6, padx=(0, 8))
     var = tk.StringVar(value="我的 MSM8916 配置")
-    ttk.Entry(frm, textvariable=var, width=28).grid(row=0, column=1, pady=6, padx=6)
-    ttk.Button(frm, text="创建", command=dlg.destroy).grid(row=1, column=0, columnspan=2, pady=(8, 0))
+    ttk.Entry(frm, textvariable=var, width=28).grid(row=0, column=1, pady=6)
+    ttk.Button(frm, text="创建", style="Primary.TButton",
+               command=dlg.destroy).grid(row=1, column=0, columnspan=2, sticky="e", pady=(10, 0))
     dlg.bind("<Return>", lambda e: dlg.destroy())
     dlg.wait_visibility()
     dlg.wait_window()
