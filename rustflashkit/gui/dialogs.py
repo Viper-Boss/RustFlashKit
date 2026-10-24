@@ -12,6 +12,7 @@ from rustflashkit.core.modules import COMMON_PARTITIONS, FlashModule
 from rustflashkit.core.plan import FlashPlan
 
 CONFIRM_WORD_BL = "确认引导链"
+FIELD_W = 46  # 表单控件统一宽度
 
 
 class ModalDialog(tk.Toplevel):
@@ -47,22 +48,22 @@ class ModuleEditor(ModalDialog):
         self.v_desc = tk.StringVar(value=m.description)
         self.v_sha = tk.StringVar(value=m.sha256)
 
-        def row(r: int, label: str, widget, width: int = 44):
+        def row(r: int, label: str, widget):
             ttk.Label(frm, text=label).grid(row=r, column=0, sticky="w", pady=3, padx=(0, 8))
             widget.grid(row=r, column=1, columnspan=2, sticky="we", pady=3)
             return widget
 
-        row(0, "模块 ID*", ttk.Entry(frm, textvariable=self.v_id, width=width, state=(
+        row(0, "模块 ID*", ttk.Entry(frm, textvariable=self.v_id, width=FIELD_W, state=(
             "disabled" if self.editing else "normal")))
-        row(1, "模块名称*", ttk.Entry(frm, textvariable=self.v_name, width=width))
-        row(2, "分区名*", ttk.Combobox(frm, textvariable=self.v_part, width=width - 2,
+        row(1, "模块名称*", ttk.Entry(frm, textvariable=self.v_name, width=FIELD_W))
+        row(2, "分区名*", ttk.Combobox(frm, textvariable=self.v_part, width=FIELD_W - 2,
                                        values=COMMON_PARTITIONS))
 
         img_frm = ttk.Frame(frm)
         ttk.Entry(img_frm, textvariable=self.v_img).pack(side="left", fill="x", expand=True)
         ttk.Button(img_frm, text="浏览…", command=self._browse_image, width=8).pack(side="left", padx=(6, 0))
         row(3, "镜像文件*", img_frm)
-        row(4, "说明", ttk.Entry(frm, textvariable=self.v_desc, width=width))
+        row(4, "说明", ttk.Entry(frm, textvariable=self.v_desc, width=FIELD_W))
 
         sha_frm = ttk.Frame(frm)
         ttk.Entry(sha_frm, textvariable=self.v_sha).pack(side="left", fill="x", expand=True)

@@ -5,3 +5,5 @@ dist/
 config/settings.json
 logs/
 profiles/images/
+.fake_tools/
+push_via_api.py
