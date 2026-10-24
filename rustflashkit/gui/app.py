@@ -31,8 +31,8 @@ class MainApp(tk.Tk):
         super().__init__()
         P = PALETTE
         self.title(f"{APP_NAME} — MSM8916 刷机与模块配置工具")
-        self.geometry("1120x740")
-        self.minsize(980, 640)
+        self.geometry("1120x780")
+        self.minsize(980, 660)
         self.configure(bg=P["bg"])
 
         self._init_fonts()
@@ -49,6 +49,7 @@ class MainApp(tk.Tk):
         self.executor: Optional[FlashExecutor] = None
         self.session_log: Optional[SessionLog] = None
         self.ui_queue: "queue.Queue[tuple]" = queue.Queue()
+        self._export_open = False
 
         self._build_style()
         self._build_menu()
@@ -170,6 +171,7 @@ class MainApp(tk.Tk):
 
         tool_menu = tk.Menu(m, tearoff=False)
         tool_menu.add_command(label="设置 adb/fastboot 路径…", command=self.open_settings)
+        tool_menu.add_command(label="固件导出（备份）…", command=self.open_export)
         tool_menu.add_command(label="打开日志目录", command=lambda: self._open_dir(app_root() / "logs"))
         tool_menu.add_command(label="打开配置目录", command=lambda: self._open_dir(app_root() / "config"))
         m.add_cascade(label="工具", menu=tool_menu)
@@ -241,7 +243,9 @@ class MainApp(tk.Tk):
                    command=self._poll_device_now).pack(fill="x", pady=2)
         ttk.Button(inner, text="重启到 Bootloader", style="Tool.TButton",
                    command=self.reboot_to_bootloader).pack(fill="x", pady=2)
-        self.btn_refresh, self.btn_to_bl = inner.winfo_children()[-2:]
+        ttk.Button(inner, text="⬇ 导出固件（备份）…", style="Tool.TButton",
+                   command=self.open_export).pack(fill="x", pady=2)
+        self.btn_refresh, self.btn_to_bl, self.btn_export = inner.winfo_children()[-3:]
 
         ttk.Separator(inner, orient="horizontal").pack(fill="x", pady=10)
         ttk.Label(inner, text="刷机选项", style="Muted.TLabel").pack(anchor="w")
@@ -285,6 +289,17 @@ class MainApp(tk.Tk):
                                   style="Card.TLabelframe")
         mod_card.pack(fill="both", expand=True)
         cols = ("name", "partition", "image", "status")
+
+        btns = ttk.Frame(mod_card, style="Card.TFrame")
+        btns.pack(side="bottom", fill="x", pady=(8, 0))
+        for text, cmd in (("＋ 添加", self.add_module), ("✎ 编辑", self.edit_module),
+                          ("⧉ 复制", self.duplicate_module), ("✕ 删除", self.delete_module),
+                          ("↑ 上移", lambda: self.move_module(-1)),
+                          ("↓ 下移", lambda: self.move_module(1))):
+            ttk.Button(btns, text=text, style="ToolSmall.TButton", command=cmd,
+                       width=8).pack(side="left", padx=(0, 6))
+        self._module_buttons = list(btns.winfo_children())
+
         self.tree = ttk.Treeview(mod_card, columns=cols, show="tree headings",
                                  height=7, selectmode="browse", style="Treeview")
         self.tree.heading("#0", text="启用")
@@ -300,7 +315,7 @@ class MainApp(tk.Tk):
         vsb = ttk.Scrollbar(mod_card, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True, padx=(2, 0))
-        vsb.pack(side="left", fill="y", padx=(6, 2))
+        vsb.pack(side="left", fill="y")
         self.tree.bind("<Button-1>", self._on_tree_click)
         self.tree.bind("<Double-1>", lambda e: self.edit_module())
         self.tree.bind("<space>", lambda e: self.toggle_selected())
@@ -308,16 +323,6 @@ class MainApp(tk.Tk):
         self.tree.tag_configure("missing", foreground=P["danger"])
         self.tree.tag_configure("danger", foreground=P["warn"])
         self.tree.tag_configure("disabled_row", foreground="#9ca3af")
-
-        btns = ttk.Frame(mod_card, style="Card.TFrame")
-        btns.pack(fill="x", pady=(8, 0))
-        for text, cmd in (("＋ 添加", self.add_module), ("✎ 编辑", self.edit_module),
-                          ("⧉ 复制", self.duplicate_module), ("✕ 删除", self.delete_module),
-                          ("↑ 上移", lambda: self.move_module(-1)),
-                          ("↓ 下移", lambda: self.move_module(1))):
-            ttk.Button(btns, text=text, style="ToolSmall.TButton", command=cmd,
-                       width=8).pack(side="left", padx=(0, 6))
-        self._module_buttons = list(btns.winfo_children())
 
         log_card = ttk.Labelframe(right, text="日志", style="Card.TLabelframe")
         log_card.pack(fill="both", expand=True, pady=(12, 2))
@@ -388,6 +393,13 @@ class MainApp(tk.Tk):
                  else "✗ 失败：设备需处于系统模式（adb 可见）或已在 Bootloader 模式",
                  "ok" if ok else "err")
         self.after(4000, self._poll_device_now)
+
+    def open_export(self) -> None:
+        if self.executor and self.executor.running:
+            messagebox.showwarning("刷机进行中", "请等待当前刷机任务结束后再导出。")
+            return
+        from rustflashkit.gui.export_dialog import ExportDialog
+        ExportDialog(self)
 
     # ==================================================================
     # 配置档案
@@ -621,6 +633,10 @@ class MainApp(tk.Tk):
     def start_flash(self) -> None:
         if not self._require_profile():
             return
+        if self._export_open:
+            messagebox.showwarning("导出窗口已打开",
+                                   "导出与刷写不能同时进行，请先关闭固件导出窗口。")
+            return
         info = self.device.probe()
         if info.mode == "none":
             messagebox.showwarning(
@@ -668,7 +684,7 @@ class MainApp(tk.Tk):
     def _set_flashing(self, flashing: bool) -> None:
         state = "disabled" if flashing else "normal"
         for b in [self.btn_preview, self.btn_flash, self.btn_refresh, self.btn_to_bl,
-                  self.btn_tools, *self._module_buttons]:
+                  self.btn_export, self.btn_tools, *self._module_buttons]:
             b.configure(state=state)
         self.tree.configure(selectmode="none" if flashing else "browse")
         self.btn_cancel.configure(state="normal" if flashing else "disabled")

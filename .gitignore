@@ -4,6 +4,7 @@ build/
 dist/
 config/settings.json
 logs/
+exports/
 profiles/images/
 .fake_tools/
 push_via_api.py

@@ -4,7 +4,7 @@
 
 **MSM8916（骁龙 410 / UFI 棒子）Windows 刷机与模块配置工具**
 
-模块化刷写 · 计划预览与二次确认 · 分区安全策略 · 纯标准库 · 可打包单文件 exe
+模块化刷写 · 固件导出备份 · 计划预览与二次确认 · 分区安全策略 · 纯标准库 · 可打包单文件 exe
 
 ![main](docs/screenshots/main-window.png)
 
@@ -21,6 +21,7 @@
 - [快速开始](#快速开始)
 - [如何进入 Bootloader 模式](#如何进入-bootloader-模式)
 - [配置档案（Profile）](#配置档案profile)
+- [固件导出与备份](#固件导出与备份)
 - [安全机制](#安全机制)
 - [常见问题](#常见问题-faq)
 - [打包为 exe](#打包为-exe)
@@ -73,6 +74,7 @@ RustFlashKit 是一个运行在 **Windows** 上的图形化刷机工具，面向
 | SHA256 校验 | 模块可填哈希，刷写前自动比对，不匹配立即中止 |
 | 失败即停 | 任何一步失败不再执行后续步骤；执行中可随时取消 |
 | 设备管理 | adb/fastboot 双通道探测；系统模式一键重启进 Bootloader |
+| 固件导出/备份 | 读取设备分区表，adb 只读导出分区镜像，自动 SHA256，一键生成配置档案 |
 | 会话日志 | 窗口实时日志 + 文件存档，事后可追溯 |
 | 零依赖 | 仅 Python 标准库（tkinter）；PyInstaller 一键打包 |
 
@@ -150,6 +152,24 @@ JSON 格式，随文件所在目录作为镜像相对路径的基准。示例：
 
 内置模板：`profiles/ufi003_rustsimhub.json`（RustSimHub 实测三分区）、`profiles/msm8916_blank.json`（空白）。
 
+## 固件导出与备份
+
+![export](docs/screenshots/export-dialog.png)
+
+入口：左侧「⬇ 导出固件（备份）…」或 `工具 → 固件导出（备份）…`。导出是**只读**操作，与刷写互斥但本身无风险，是刷机前推荐的自我保护手段。
+
+工作流程：
+
+1. **读取分区表**：设备需处于系统模式（adb 可见）。工具枚举 `/dev/block/bootdevice/by-name/` 下全部分区（名称 + 大小 + 设备节点），自动预选 boot/rootfs/system/recovery/NSHSTATE 等常用分区，可全选或 Ctrl/Shift 自选
+2. **开始导出**：逐个分区 `adb pull` 到输出目录（默认 `exports/`），按分区大小自动放大超时；任一失败即停止，已完成的仍然有效
+3. **自动 SHA256**（默认勾选）：导出完成即计算镜像哈希
+4. **③ 从导出生成配置档案**：一键把本次导出变成可刷写的 Profile（分区名 + 镜像 + SHA256 齐全）并载入主窗口——需要刷回时勾选即可
+
+两点说明：
+
+- **Bootloader (fastboot) 模式没有标准的分区读取命令**，因此导出只在系统模式可用；fastboot 下只能写不能读。
+- 与刷写相反，**备份 EFS/IMEI 分区（modemst1/modemst2 等）是强烈推荐的操作**——刷坏前有一份备份，救得回来。若导出报 Permission denied，说明设备的 adbd 无 root 权限，需先刷入 root adbd 的系统再备份。
+
 ## 安全机制
 
 刷错分区的代价差异极大，工具内置三道防线：
@@ -175,7 +195,10 @@ A：多为 Windows 驱动问题。设备管理器里找带感叹号的 "Android"
 A：在模块编辑器把超时调大（rootfs 建议 ≥600 秒）；同时换 USB 口/线（优先 USB 2.0 接口、劣质线是大数据量刷写失败的头号原因）。
 
 **Q：我的棒子不是 UFI003，能用吗？**
-A：可以，但要先确认分区表：新建空白配置，按你的设备实际分区添加模块。分区名错误轻则失败、重则变砖，请先在 fastboot 下用 `fastboot getvar all` 核对。
+A：可以，但要先确认分区表：新建空白配置，按你的设备实际分区添加模块。更省事的办法是先用「固件导出」里的**读取分区表**功能枚举设备真实分区，再决定要备份/刷写哪些。分区名错误轻则失败、重则变砖，请先在 fastboot 下用 `fastboot getvar all` 核对。
+
+**Q：导出固件时报 Permission denied？**
+A：设备的 adbd 没有 root 权限，读不了块设备。这类棒子的原厂/第三方系统通常默认 root adbd；若确实没有，请先刷入带 root adbd 的系统再导出。
 
 **Q：和 RustSimHub 是什么关系？**
 A：相互独立的项目。RustSimHub 是设备端固件（Rust 通信系统），RustFlashKit 是通用刷写/配置前端，参考了其实测分区信息；RustSimHub 官方尚未发布通用刷机包，镜像请自行构建并提供。
@@ -187,11 +210,11 @@ A：相互独立的项目。RustSimHub 是设备端固件（Rust 通信系统）
 ## 开发与测试
 
 ```bash
-python -m unittest discover -s tests    # 34 项测试（含假 adb/fastboot 端到端刷机流程）
+python -m unittest discover -s tests    # 41 项测试（含假 adb/fastboot 端到端刷机与导出流程）
 python -m rustflashkit                  # 启动 GUI
 ```
 
-测试覆盖：Profile 加载/校验/往返、分区安全策略（EFS 拒绝/引导链门槛/非法名）、计划生成（顺序/跳过/错误收集）、设备探测、执行器（成功流程/SHA256 拦截/失败即停/取消）。GUI 无自动化测试，仅冒烟截图脚本（`tests/gui_smoke.py`、`make_screenshots.py`，需 Xvfb）。
+测试覆盖：Profile 加载/校验/往返、分区安全策略（EFS 拒绝/引导链门槛/非法名）、计划生成（顺序/跳过/错误收集）、设备探测、执行器（成功流程/SHA256 拦截/失败即停/取消）、导出器（分区表解析/单分区导出/批量流/失败中止/取消）。GUI 无自动化测试，仅冒烟截图脚本（`tests/gui_smoke.py`、`make_screenshots.py`，需 Xvfb）。
 
 ## 项目结构
 
@@ -209,10 +232,13 @@ RustFlashKit/
 │   │   ├── plan.py      # 刷机计划生成（dry-run 语义）
 │   │   ├── safety.py    # 分区风险分级与强制校验
 │   │   ├── flasher.py   # 后台线程执行器（失败即停/可取消）
+│   │   ├── exporter.py  # 固件导出：分区表读取 + adb pull 批量备份
 │   │   └── config.py    # 设置与会话日志
 │   └── gui/
 │       ├── app.py       # 主窗口
-│       └── dialogs.py   # 模块编辑器 / 计划预览 / 设置
+│       ├── dialogs.py   # 模块编辑器 / 计划预览 / 设置
+│       ├── export_dialog.py  # 固件导出（备份）对话框
+│       └── theme.py     # 调色板与主题
 └── tests/               # 单元测试 + 假工具 + GUI 冒烟
 ```
 

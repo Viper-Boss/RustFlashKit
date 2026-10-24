@@ -33,7 +33,7 @@ for name, size in {"boot.img": 6 * 1024 * 1024,
         fh.truncate(size)
 
 app = MainApp()
-app.geometry("1120x740+20+20")
+app.geometry("1120x780+20+20")
 app._apply_profile(ROOT / "profiles" / "ufi003_rustsimhub.json")
 app.profile.modules[2].enabled = True   # NSHSTATE 也勾上，表格更丰满
 app.refresh_modules()
@@ -51,6 +51,20 @@ elif which == "editor":
     dlg = ModuleEditor(app, module=app.profile.modules[0],
                        base_dir=app.base_dir, used_ids=set())
     print("DLG", hex(dlg.winfo_id()), file=sys.stderr)
+elif which == "export":
+    from rustflashkit.gui.export_dialog import ExportDialog
+    # 让设备探测走 adb（系统模式）：静音假 fastboot
+    fb = ftdir / "fastboot"
+    fb.write_text('#!/bin/sh\nexit 0\n')
+    import stat as _stat
+    fb.chmod(fb.stat().st_mode | _stat.S_IEXEC)
+    dlg = ExportDialog(app)
+    dlg.geometry("820x660+140+20")
+    print("DLG", hex(dlg.winfo_id()), file=sys.stderr)
+    for _ in range(15):
+        app.update(); time.sleep(0.04)
+    dlg._read_table()
+    dlg._select_preset()
 
 print("APP", hex(app.winfo_id()), file=sys.stderr)
 end = time.time() + 50
