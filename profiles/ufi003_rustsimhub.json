@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "name": "UFI003 · RustSimHub 参考模板",
+  "board": "UFI003_MB_V02 (MSM8916 / 骁龙410)",
+  "description": "RustSimHub 项目实机验证的分区：boot / rootfs / NSHSTATE。官方尚未发布通用刷机包，镜像路径请改为你的实际构建产物（相对本文件所在目录）。boot 与 rootfs 应当一起刷写。",
+  "modules": [
+    {
+      "id": "boot",
+      "name": "内核 boot",
+      "partition": "boot",
+      "image": "images/boot.img",
+      "enabled": true,
+      "required": false,
+      "description": "Linux 内核镜像（RustSimHub 使用 6.12.x）",
+      "timeout": 300
+    },
+    {
+      "id": "rootfs",
+      "name": "系统 rootfs",
+      "partition": "rootfs",
+      "image": "images/rootfs.img",
+      "enabled": true,
+      "required": false,
+      "description": "Debian ARM64 根文件系统（含 Rust 用户态），镜像较大，超时已放大",
+      "timeout": 900
+    },
+    {
+      "id": "nshstate",
+      "name": "状态分区 NSHSTATE",
+      "partition": "NSHSTATE",
+      "image": "images/nshstate.img",
+      "enabled": false,
+      "required": false,
+      "allow_missing": true,
+      "description": "RustSimHub 状态分区；仅在需要重置状态时启用",
+      "timeout": 120
+    }
+  ]
+}

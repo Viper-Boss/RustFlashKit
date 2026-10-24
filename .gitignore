@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+build/
+dist/
+config/settings.json
+logs/
+profiles/images/
