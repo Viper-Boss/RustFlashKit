@@ -1,4 +1,5 @@
 """固件导出（exporter）测试：分区表解析、单分区导出、批量任务流。"""
+import os
 import tempfile
 import time
 import unittest
@@ -26,6 +27,7 @@ def run_job(runner, serial, parts, out_dir, with_sha256, timeout=15):
     return job, events
 
 
+@unittest.skipIf(os.name == "nt", "假工具依赖 POSIX shell")
 class TestExporter(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())

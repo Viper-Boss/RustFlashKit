@@ -1,4 +1,4 @@
-"""设备状态探测：adb / fastboot 设备轮询与模式切换。"""
+"""设备状态探测：adb / fastboot 设备枚举（支持多设备）与模式切换。"""
 from __future__ import annotations
 
 import re
@@ -27,16 +27,14 @@ class DeviceInfo:
     @property
     def label(self) -> str:
         if self.mode == "bootloader":
-            return f"Bootloader 模式 · {self.serial}"
+            return f"Bootloader · {self.serial}"
         if self.mode == "system":
             return f"{self.detail} · {self.serial}"
-        if not self.adb_found and not self.fastboot_found:
-            return "未找到 adb / fastboot 工具"
         return "未检测到设备"
 
 
 class DeviceService:
-    """聚合 adb/fastboot 设备查询。供 GUI 轮询调用。"""
+    """聚合 adb/fastboot 设备查询。probe_all 返回全部设备（fastboot 在前）。"""
 
     def __init__(self, runner: ToolRunner):
         self.runner = runner
@@ -56,33 +54,44 @@ class DeviceService:
                 found.append((m.group(1), m.group(2)))
         return found
 
+    def probe_all(self) -> List[DeviceInfo]:
+        tools_ok = {"adb": self.runner.tool_path("adb") is not None,
+                    "fastboot": self.runner.tool_path("fastboot") is not None}
+        devices: List[DeviceInfo] = []
+        for s in self._fastboot_devices():
+            devices.append(DeviceInfo("bootloader", serial=s,
+                                      fastboot_found=tools_ok["fastboot"],
+                                      adb_found=tools_ok["adb"]))
+        for serial, state in self._adb_devices():
+            devices.append(DeviceInfo("system", serial=serial,
+                                      detail=ADB_STATE_NAMES.get(state, state),
+                                      adb_found=tools_ok["adb"],
+                                      fastboot_found=tools_ok["fastboot"]))
+        return devices
+
     def probe(self) -> DeviceInfo:
-        fb = self._fastboot_devices()
-        if fb:
-            return DeviceInfo("bootloader", serial=fb[0],
-                              adb_found=self.runner.tool_path("adb") is not None,
-                              fastboot_found=True)
-        adbs = self._adb_devices()
-        if adbs:
-            serial, state = adbs[0]
-            return DeviceInfo("system", serial=serial,
-                              detail=ADB_STATE_NAMES.get(state, state),
-                              adb_found=True,
-                              fastboot_found=self.runner.tool_path("fastboot") is not None)
+        """第一台设备（fastboot 优先）；无设备时返回 mode="none"。"""
+        devs = self.probe_all()
+        if devs:
+            return devs[0]
         return DeviceInfo("none",
                           adb_found=self.runner.tool_path("adb") is not None,
                           fastboot_found=self.runner.tool_path("fastboot") is not None)
 
     # ---- 动作 ---------------------------------------------------------
-    def reboot_to_bootloader(self) -> bool:
-        """从系统模式重启进 Bootloader。"""
-        info = self.probe()
-        if info.mode == "bootloader":
-            return True
-        if info.mode != "system":
-            return False
-        return self.runner.run("adb", ["-s", info.serial, "reboot", "bootloader"], timeout=30).ok
+    def reboot_to_bootloader(self, serial: str = "") -> bool:
+        """从系统模式重启进 Bootloader；serial 为空时自动探测。"""
+        if not serial:
+            info = self.probe()
+            if info.mode == "bootloader":
+                return True
+            if info.mode != "system":
+                return False
+            serial = info.serial
+        return self.runner.run("adb", ["-s", serial, "reboot", "bootloader"],
+                               timeout=30).ok
 
-    def reboot_device(self) -> bool:
+    def reboot_device(self, serial: str = "") -> bool:
         """从 Bootloader 重启设备。"""
-        return self.runner.run("fastboot", ["reboot"], timeout=30).ok
+        args = (["-s", serial] if serial else []) + ["reboot"]
+        return self.runner.run("fastboot", args, timeout=30).ok

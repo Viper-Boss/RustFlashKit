@@ -155,29 +155,31 @@ class ExportDialog(tk.Toplevel):
     # 设备与分区表
     # ==================================================================
     def _refresh_device(self) -> None:
-        info = self.main.device.probe()
-        if info.mode == "system":
-            bg, fg, text = P["accent_soft"], "#1e40af", info.label
-        elif info.mode == "bootloader":
-            bg, fg, text = P["warn_soft"], P["warn"], \
-                f"{info.label}（导出需系统模式 adb）"
+        dev = self.main.current_device() or self.main.device.probe()
+        if dev is None or dev.mode == "none":
+            bg, fg, text = P["danger_soft"], "#991b1b", "⚠ 未检测到设备"
+        elif dev.mode == "system":
+            bg, fg, text = P["accent_soft"], "#1e40af", dev.label
+        elif dev.mode == "bootloader":
+            bg, fg, text = P["warn_soft"], P["warn"], f"{dev.label}（导出需系统模式 adb）"
         else:
-            bg, fg, text = P["danger_soft"], "#991b1b", "⚠ 未检测到 adb 设备"
+            bg, fg, text = P["log_sb"], P["header_fg"], dev.label
         self.chip.configure(text=f"  {text}  ", bg=bg, fg=fg)
 
     def _read_table(self) -> None:
-        info = self.main.device.probe()
+        dev = self.main.current_device() or self.main.device.probe()
         self._refresh_device()
-        if info.mode != "system":
+        if dev is None or dev.mode != "system":
             messagebox.showwarning(
                 "需要 adb 设备",
                 "固件导出需要设备处于系统模式（adb 可见）。\n\n"
                 "Bootloader (fastboot) 模式没有标准的分区读取命令。\n"
                 "若设备当前在 Bootloader，请重启回系统后再试。")
             return
-        self._log(f"→ 正在读取分区表（{info.serial}）…")
+        serial = dev.serial
+        self._log(f"→ 正在读取分区表（{serial}）…")
         try:
-            self.parts = read_partition_table(self.runner, info.serial)
+            self.parts = read_partition_table(self.runner, serial)
         except RuntimeError as exc:
             self._log(f"✗ {exc}", "err")
             messagebox.showerror("读取失败", str(exc))
@@ -233,8 +235,13 @@ class ExportDialog(tk.Toplevel):
         self.results.clear()
         self._set_running(True)
         self.progress.configure(maximum=len(parts), value=0)
+        dev = self.main.current_device()
+        if dev is None or dev.mode != "system":
+            self._set_running(False)
+            messagebox.showwarning("设备已变化", "目标设备不可用，请重新读取分区表。")
+            return
         self.job = ExportJob(
-            self.runner, self.main.device.probe().serial, parts, self.out_dir,
+            self.runner, dev.serial, parts, self.out_dir,
             with_sha256=self.v_sha.get(),
             on_log=lambda s: self.q.put(("log", s)),
             on_item=lambda r: self.q.put(("item", r)),

@@ -14,6 +14,7 @@ from rustflashkit.core.runner import app_root
 class Options:
     reboot_after: bool = True
     verify_sha256: bool = True
+    pre_backup: bool = True   # 刷写前自动备份将被覆盖的分区（需设备处于系统模式）
 
 
 @dataclass

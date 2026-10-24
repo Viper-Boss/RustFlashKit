@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import queue
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 from pathlib import Path
@@ -50,6 +51,8 @@ class MainApp(tk.Tk):
         self.session_log: Optional[SessionLog] = None
         self.ui_queue: "queue.Queue[tuple]" = queue.Queue()
         self._export_open = False
+        self._device_map: dict = {}        # label -> DeviceInfo（label 含模式，跨通道唯一）
+        self._selected_label: str = ""
 
         self._build_style()
         self._build_menu()
@@ -238,7 +241,13 @@ class MainApp(tk.Tk):
         self.device_chip2.pack(anchor="w", pady=(6, 4))
         self.device_detail = tk.Label(inner, text="", bg=P["card"], fg=P["muted"],
                                       font=self.f_ui, wraplength=200, justify="left")
-        self.device_detail.pack(anchor="w", pady=(0, 8))
+        self.device_detail.pack(anchor="w", pady=(0, 6))
+        self.v_device = tk.StringVar()
+        self.device_combo = ttk.Combobox(inner, state="readonly",
+                                         textvariable=self.v_device)
+        self.device_combo.pack(fill="x", pady=(0, 6))
+        self.device_combo.bind("<<ComboboxSelected>>",
+                               lambda e: self._on_device_selected())
 
         ttk.Button(inner, text="立即刷新", style="Tool.TButton",
                    command=self._poll_device_now).pack(fill="x", pady=2)
@@ -258,6 +267,9 @@ class MainApp(tk.Tk):
         self.opt_sha = tk.BooleanVar(value=self.settings.options.verify_sha256)
         ttk.Checkbutton(inner, text="刷写前校验 SHA256（若配置）", style="Card.TCheckbutton",
                         variable=self.opt_sha).pack(anchor="w", pady=1)
+        self.opt_backup = tk.BooleanVar(value=self.settings.options.pre_backup)
+        ttk.Checkbutton(inner, text="刷写前自动备份目标分区", style="Card.TCheckbutton",
+                        variable=self.opt_backup).pack(anchor="w", pady=1)
 
         ttk.Separator(inner, orient="horizontal").pack(fill="x", pady=10)
         ttk.Label(inner, text="平台工具", style="Muted.TLabel").pack(anchor="w")
@@ -356,14 +368,14 @@ class MainApp(tk.Tk):
     # ==================================================================
     # 设备轮询
     # ==================================================================
-    def _device_chip_colors(self, info: DeviceInfo) -> tuple[str, str]:
+    def _device_chip_colors(self, info: Optional[DeviceInfo]) -> tuple[str, str]:
         P = PALETTE
+        if info is None:
+            return P["danger_soft"], "#991b1b"
         if info.mode == "bootloader":
             return P["ok_soft"], P["ok_deep"]
         if info.mode == "system":
             return P["accent_soft"], "#1e40af"
-        if not (info.adb_found or info.fastboot_found):
-            return P["danger_soft"], "#991b1b"
         return P["log_sb"], P["header_fg"]
 
     def _poll_device_now(self) -> None:
@@ -372,26 +384,49 @@ class MainApp(tk.Tk):
     def _poll_device(self) -> None:
         P = PALETTE
         if self.executor is None:  # 刷机中不轮询，避免干扰 fastboot
-            info = self.device.probe()
-            chip_bg, chip_fg = self._device_chip_colors(info)
-            text = "⚠ 未找到 adb / fastboot 工具" if info.mode == "none" and \
-                not (info.adb_found or info.fastboot_found) else info.label
+            devs = self.device.probe_all()
+            self._device_map = {d.label: d for d in devs}
+            if self._selected_label not in self._device_map:
+                self._selected_label = devs[0].label if devs else ""
+            self.device_combo.configure(values=[d.label for d in devs])
+            sel = self._device_map.get(self._selected_label)
+            if sel:
+                self.device_combo.set(sel.label)
+            chip_bg, chip_fg = self._device_chip_colors(sel)
+            if sel is None:
+                if not (self.runner.tool_path("adb") or self.runner.tool_path("fastboot")):
+                    text = "⚠ 未找到 adb / fastboot 工具"
+                else:
+                    text = "未检测到设备"
+                detail = "等待设备接入"
+            else:
+                text = sel.label
+                detail = sel.detail or "等待设备接入"
             for chip in (self.device_chip, self.device_chip2):
                 chip.configure(text=f"  {text}  ", bg=chip_bg, fg=chip_fg)
-            self.device_detail.configure(text=info.detail or "等待设备接入")
-            self.adb_lbl.configure(
-                text=f"adb：{'✓ 已就绪' if info.adb_found else '✗ 未找到'}",
-                fg=P["ok"] if info.adb_found else "#9ca3af")
+            self.device_detail.configure(text=detail)
+            adb_ok = self.runner.tool_path("adb") is not None
+            fb_ok = self.runner.tool_path("fastboot") is not None
+            self.adb_lbl.configure(text=f"adb：{'✓ 已就绪' if adb_ok else '✗ 未找到'}",
+                                   fg=P["ok"] if adb_ok else "#9ca3af")
             self.fb_lbl.configure(
-                text=f"fastboot：{'✓ 已就绪' if info.fastboot_found else '✗ 未找到'}",
-                fg=P["ok"] if info.fastboot_found else "#9ca3af")
+                text=f"fastboot：{'✓ 已就绪' if fb_ok else '✗ 未找到'}",
+                fg=P["ok"] if fb_ok else "#9ca3af")
         self.after(POLL_MS, self._poll_device)
+
+    def _on_device_selected(self) -> None:
+        self._selected_label = self.v_device.get()
+        self._poll_device_now()
+
+    def current_device(self) -> Optional[DeviceInfo]:
+        return self._device_map.get(self._selected_label)
 
     def reboot_to_bootloader(self) -> None:
         if not messagebox.askyesno("确认", "确定将设备重启到 Bootloader (fastboot) 模式？"):
             return
+        dev = self.current_device()
         self.log("→ 正在重启到 Bootloader…")
-        ok = self.device.reboot_to_bootloader()
+        ok = self.device.reboot_to_bootloader(dev.serial if dev else "")
         self.log("✓ 已发送重启命令，请等待设备进入 fastboot" if ok
                  else "✗ 失败：设备需处于系统模式（adb 可见）或已在 Bootloader 模式",
                  "ok" if ok else "err")
@@ -644,8 +679,8 @@ class MainApp(tk.Tk):
             messagebox.showwarning("导出窗口已打开",
                                    "导出与刷写不能同时进行，请先关闭固件导出窗口。")
             return
-        info = self.device.probe()
-        if info.mode == "none":
+        dev = self.current_device()
+        if dev is None:
             messagebox.showwarning(
                 "未检测到设备",
                 "未检测到 fastboot/adb 设备。\n\n"
@@ -653,21 +688,95 @@ class MainApp(tk.Tk):
                 "  · 已能 adb 连接：点左侧“重启到 Bootloader”\n"
                 "  · 无法进系统：断电后按住设备功能键（如有）插入 USB")
             return
-        if info.mode == "system":
+        targets = [m.partition.strip() for m in self.profile.enabled_modules()]
+        want_backup = self.opt_backup.get() and bool(targets)
+        if dev.mode == "system":
+            if want_backup:
+                self._set_flashing(True)
+                if not self._run_backup_blocking(dev.serial, targets):
+                    self._set_flashing(False)
+                    return
             if not messagebox.askyesno(
                     "设备在系统模式",
                     "设备当前处于系统 (adb) 模式，刷写需要在 Bootloader 模式进行。\n\n"
                     "现在重启到 Bootloader 并继续吗？"):
+                self._set_flashing(False)
                 return
             self.log("→ 正在重启到 Bootloader…")
-            if not self.device.reboot_to_bootloader():
+            if not self.device.reboot_to_bootloader(dev.serial):
                 messagebox.showerror("失败", "重启到 Bootloader 失败，请手动进入后重试。")
+                self._set_flashing(False)
+                return
+        elif dev.mode == "bootloader" and want_backup:
+            if not messagebox.askyesno(
+                    "无法刷前备份",
+                    "设备已在 Bootloader 模式，无法读取分区做刷前备份。\n\n"
+                    "仍要不备份继续刷写吗？\n"
+                    "（如需备份：先重启回系统模式，用“导出固件”或勾选刷前备份）"):
                 return
         plan = self._build_plan_safe()
         dlg = PlanPreviewDialog(self, plan)
         self.wait_window(dlg)
         if dlg.confirmed:
             self._launch(plan)
+
+    # ------------------------------------------------------------------
+    def _run_backup_blocking(self, serial: str, partitions: list[str]) -> bool:
+        """刷前备份：把将被覆盖的分区经 adb 导出到 backups/。返回是否成功。"""
+        from datetime import datetime
+        from rustflashkit.core.exporter import ExportJob, read_partition_table
+        self.log(f"→ 刷前备份：读取分区表（{serial}）…")
+        try:
+            table = {p.name: p for p in read_partition_table(self.runner, serial)}
+        except RuntimeError as exc:
+            self.log(f"✗ 备份失败：{exc}", "err")
+            messagebox.showwarning("备份失败",
+                                   f"读取分区表失败：\n{exc}\n\n已取消刷写。\n"
+                                   "可在“刷机选项”关闭“刷写前自动备份目标分区”后重试。")
+            return False
+        parts = []
+        for name in partitions:
+            pt = table.get(name) or table.get(name.lower()) or table.get(name.upper())
+            if pt:
+                parts.append(pt)
+            else:
+                self.log(f"⚠ 分区 {name} 不在设备 by-name 表中，跳过其备份", "warn")
+        if not parts:
+            self.log("⚠ 没有可备份的分区，继续刷写流程", "warn")
+            return True
+        out_dir = app_root() / "backups" / f"{serial}-{datetime.now():%Y%m%d-%H%M%S}"
+        state = {"done": False, "ok": True}
+
+        def on_item(r) -> None:
+            if r.ok:
+                self.log(f"✓ 备份 {r.part.name} 完成（含 SHA256）")
+            else:
+                state["ok"] = False
+
+        def on_done(ok: bool, msg: str) -> None:
+            state["done"] = True
+            state["ok"] = state["ok"] and ok
+            if not ok:
+                self.log(f"✗ 备份未完成：{msg}", "err")
+
+        job = ExportJob(self.runner, serial, parts, out_dir, with_sha256=True,
+                        on_log=self.log, on_item=on_item, on_done=on_done)
+        job.start()
+        self.status_var.set("正在备份目标分区…（完成后才进入刷写）")
+        while not state["done"]:
+            try:
+                self.update()
+            except tk.TclError:  # 窗口被关闭
+                return False
+            time.sleep(0.05)
+        self.status_var.set("就绪")
+        if not state["ok"]:
+            messagebox.showwarning("备份未完成",
+                                   "刷前备份失败，已取消刷写（未对设备做任何写入）。\n"
+                                   "详见日志；也可关闭“刷前备份”选项后重试。")
+            return False
+        self.log(f"✓ 刷前备份完成 → {out_dir}", "ok")
+        return True
 
     def _launch(self, plan) -> None:
         if not plan.ok:
@@ -677,11 +786,17 @@ class MainApp(tk.Tk):
         self.session_log.start()
         self._set_flashing(True)
         self.progress.configure(maximum=len(plan.steps), value=0)
+        # 刷写时设备应在 Bootloader；重新探测拿到 fastboot 序列号显式指定 -s
+        info = self.device.probe()
+        serial = info.serial if info.mode == "bootloader" else ""
+        if not serial:
+            self.log("⚠ 未获取到 fastboot 序列号，fastboot 将自动选择唯一设备", "warn")
         self.executor = FlashExecutor(
             plan, self.runner, self.device,
             on_log=lambda line: self.ui_queue.put(("log", line)),
             on_step=lambda r: self.ui_queue.put(("step", r)),
-            on_done=lambda ok, msg: self.ui_queue.put(("done", (ok, msg))))
+            on_done=lambda ok, msg: self.ui_queue.put(("done", (ok, msg))),
+            serial=serial)
         self.executor.start()
 
     def cancel_flash(self) -> None:
@@ -691,8 +806,9 @@ class MainApp(tk.Tk):
     def _set_flashing(self, flashing: bool) -> None:
         state = "disabled" if flashing else "normal"
         for b in [self.btn_preview, self.btn_flash, self.btn_refresh, self.btn_to_bl,
-                  self.btn_export, self.btn_tools, *self._module_buttons]:
+                  self.btn_export, self.btn_ble, self.btn_tools, *self._module_buttons]:
             b.configure(state=state)
+        self.device_combo.configure(state="disabled" if flashing else "readonly")
         self.tree.configure(selectmode="none" if flashing else "browse")
         self.btn_cancel.configure(state="normal" if flashing else "disabled")
         self.status_var.set("正在刷机…请勿拔出设备" if flashing else "就绪")
@@ -778,6 +894,7 @@ class MainApp(tk.Tk):
             self.executor.cancel()
         self.settings.options.reboot_after = self.opt_reboot.get()
         self.settings.options.verify_sha256 = self.opt_sha.get()
+        self.settings.options.pre_backup = self.opt_backup.get()
         self.settings.save()
         self.destroy()
 

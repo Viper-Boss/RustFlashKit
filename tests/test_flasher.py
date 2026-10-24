@@ -1,4 +1,5 @@
 """FlashExecutor 端到端测试（假 fastboot）。"""
+import os
 import tempfile
 import time
 import unittest
@@ -13,7 +14,7 @@ from rustflashkit.core.runner import ToolRunner
 from tests.fakes import calls, make_fake_tools
 
 
-def run_executor(plan, runner):
+def run_executor(plan, runner, serial=""):
     svc = DeviceService(runner)
     events = {"logs": [], "steps": [], "done": []}
 
@@ -21,7 +22,8 @@ def run_executor(plan, runner):
         plan, runner, svc,
         on_log=events["logs"].append,
         on_step=lambda r: events["steps"].append(r),
-        on_done=lambda ok, msg: events["done"].append((ok, msg)))
+        on_done=lambda ok, msg: events["done"].append((ok, msg)),
+        serial=serial)
     ex.start()
     deadline = time.time() + 10
     while not events["done"] and time.time() < deadline:
@@ -29,6 +31,7 @@ def run_executor(plan, runner):
     return ex, events
 
 
+@unittest.skipIf(os.name == "nt", "假工具依赖 POSIX shell")
 class TestFlasher(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -60,6 +63,15 @@ class TestFlasher(unittest.TestCase):
         self.assertIn(["fastboot", "reboot"], argvs)
         self.assertLess(argvs.index(["fastboot", "flash", "boot", str(self.good)]),
                         argvs.index(["fastboot", "reboot"]))
+
+    def test_serial_targeting(self):
+        p = self.profile(self.mod("boot", "boot", "images/boot.img"))
+        plan = build_plan(p, self.tmp, PlanOptions(reboot_after=True))
+        _, ev = run_executor(plan, self.runner, serial="ABC123")
+        self.assertEqual(ev["done"], [(True, "全部完成")])
+        argvs = calls(self.log)
+        self.assertIn(["fastboot", "-s", "ABC123", "flash", "boot", str(self.good)], argvs)
+        self.assertIn(["fastboot", "-s", "ABC123", "reboot"], argvs)
 
     def test_sha256_mismatch_stops(self):
         import hashlib

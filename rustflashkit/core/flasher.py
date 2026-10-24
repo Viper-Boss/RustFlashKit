@@ -30,15 +30,20 @@ class FlashExecutor:
     def __init__(self, plan: FlashPlan, runner: ToolRunner, device: DeviceService,
                  on_log: Callable[[str], None],
                  on_step: Callable[[StepResult], None],
-                 on_done: Callable[[bool, str], None]):
+                 on_done: Callable[[bool, str], None],
+                 serial: str = ""):
         self.plan = plan
         self.runner = runner
         self.device = device
+        self.serial = serial  # 目标设备序列号（多设备时显式指定 fastboot -s）
         self.on_log = on_log
         self.on_step = on_step
         self.on_done = on_done
         self._cancel = threading.Event()
         self._thread: Optional[threading.Thread] = None
+
+    def _fb_args(self, args: list[str]) -> list[str]:
+        return (["-s", self.serial] if self.serial else []) + args
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -87,7 +92,7 @@ class FlashExecutor:
 
         if step.kind == "flash":
             res = self.runner.run("fastboot",
-                                  ["flash", step.partition, str(step.image)],
+                                  self._fb_args(["flash", step.partition, str(step.image)]),
                                   timeout=step.timeout)
             if not res.ok:
                 return False, (res.stderr or res.stdout or "fastboot 返回非零").strip()[:400]
@@ -97,7 +102,7 @@ class FlashExecutor:
             return True, ""
 
         if step.kind == "reboot":
-            res = self.runner.run("fastboot", ["reboot"], timeout=30)
+            res = self.runner.run("fastboot", self._fb_args(["reboot"]), timeout=30)
             return (True, "") if res.ok else (False, (res.stderr or "reboot 失败").strip()[:200])
 
         if step.kind == "delay":

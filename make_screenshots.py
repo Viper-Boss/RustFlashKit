@@ -33,7 +33,7 @@ for name, size in {"boot.img": 6 * 1024 * 1024,
         fh.truncate(size)
 
 app = MainApp()
-app.geometry("1120x780+20+20")
+app.geometry("1120x840+20+20")
 app._apply_profile(ROOT / "profiles" / "ufi003_rustsimhub.json")
 app.profile.modules[2].enabled = True   # NSHSTATE 也勾上，表格更丰满
 app.refresh_modules()

@@ -4,7 +4,9 @@
 
 **MSM8916（骁龙 410 / UFI 棒子）Windows 刷机与模块配置工具**
 
-模块化刷写 · 固件导出备份 · 蓝牙（BLE）配置（实验） · 计划预览与二次确认 · 分区安全策略 · 可打包单文件 exe
+模块化刷写 · 固件导出备份 · 刷前自动备份 · 多设备选择 · 蓝牙（BLE）配置（实验） · 可打包单文件 exe
+
+[![CI](https://github.com/Viper-Boss/RustFlashKit/actions/workflows/ci.yml/badge.svg)](https://github.com/Viper-Boss/RustFlashKit/actions/workflows/ci.yml)
 
 ![main](docs/screenshots/main-window.png)
 
@@ -47,7 +49,7 @@ RustFlashKit 是一个运行在 **Windows** 上的图形化刷机工具，面向
 ![main](docs/screenshots/main-window.png)
 
 - **深色顶栏**：应用标题 + 右侧实时设备状态徽章（绿 = Bootloader 模式、蓝 = 系统模式、红 = 工具缺失）
-- **左侧·设备与选项**：设备徽章与详情，自动轮询 adb/fastboot（2 秒一次）；平台工具就绪状态（绿 ✓）；刷机选项；一键「重启到 Bootloader」
+- **左侧·设备与选项**：设备徽章与详情、**设备下拉框**（多设备时指定目标，所有命令显式带序列号）；平台工具就绪状态（绿 ✓）；刷机选项（含**刷写前自动备份**）；一键「重启到 Bootloader」
 - **中间·模块表格**：每行一个模块——勾选框（点击 ☑/☐ 切换，🔒 表示必需项）、模块名、分区、镜像文件、状态（存在显示大小，缺失标红，引导链分区带 ⚠ 标记）
 - **左下·动作**：进度条 + `① 生成预览`（蓝）→ `② 开始刷机…`（红），执行期间锁定界面并可取消
 - **下方·日志（控制台风）**：实时显示每一条执行的命令与输出，同时写入 `logs/flash-<时间戳>.log`
@@ -74,7 +76,8 @@ RustFlashKit 是一个运行在 **Windows** 上的图形化刷机工具，面向
 | 分区安全策略 | EFS/IMEI 分区一律拒绝；引导链分区需显式允许；分区名合法性校验 |
 | SHA256 校验 | 模块可填哈希，刷写前自动比对，不匹配立即中止 |
 | 失败即停 | 任何一步失败不再执行后续步骤；执行中可随时取消 |
-| 设备管理 | adb/fastboot 双通道探测；系统模式一键重启进 Bootloader |
+| 设备管理 | adb/fastboot 双通道探测，多设备下拉选择，全链路显式序列号（-s）防刷错设备 |
+| 刷前自动备份 | 刷写前自动把将被覆盖的分区经 adb 导出到 `backups/`（含 SHA256），失败即取消刷写 |
 | 固件导出/备份 | 读取设备分区表，adb 只读导出分区镜像，自动 SHA256，一键生成配置档案 |
 | 蓝牙配置（实验） | BLE 扫描/GATT 枚举诊断 + 模板化配网载荷发送骨架（固件协议定稿后改 JSON 模板即对接） |
 | 会话日志 | 窗口实时日志 + 文件存档，事后可追溯 |
@@ -92,9 +95,11 @@ RustFlashKit 是一个运行在 **Windows** 上的图形化刷机工具，面向
 2. 双击 run.bat
 3. 文件 → 打开配置… → profiles/ufi003_rustsimhub.json（或新建空白配置）
 4. 双击模块行，把「镜像文件」改为你构建出的实际镜像路径
-5. 插上设备 → 「重启到 Bootloader」
+5. 插上设备 → 左侧下拉选择目标设备 → 「重启到 Bootloader」
 6. ① 生成预览 → 逐条核对 → ② 开始刷机…
 ```
+
+> 默认勾选「刷写前自动备份目标分区」：从系统模式发起刷写时，工具会先把将被覆盖的分区经 adb 导出到 `backups/<序列号>-<时间>/`（含 SHA256），备份成功才重启进入刷写；备份失败则不写设备。设备已在 Bootloader 模式时无法备份，会单独询问是否继续。
 
 ## 如何进入 Bootloader 模式
 
@@ -227,14 +232,18 @@ A：相互独立的项目。RustSimHub 是设备端固件（Rust 通信系统）
 
 双击 `build_exe.bat`（需已安装 Python），产物在 `dist/RustFlashKit/`。分发时把 platform-tools 放进其 `tools/` 子目录即可单目录分发。
 
+也可以直接从 GitHub Releases 下载 CI 构建的 exe：在本地打 tag（如 `v0.5.0`）并推送，CI 会自动构建并挂到 Releases；main 分支的每次推送也会生成 artifact（Actions 页面下载）。
+
 ## 开发与测试
 
 ```bash
-python -m unittest discover -s tests    # 50 项测试（含假 adb/fastboot 端到端刷机与导出流程）
+python -m unittest discover -s tests    # 53 项测试（含假 adb/fastboot 端到端刷机与导出流程）
 python -m rustflashkit                  # 启动 GUI
 ```
 
-测试覆盖：Profile 加载/校验/往返、分区安全策略（EFS 拒绝/引导链门槛/非法名）、计划生成（顺序/跳过/错误收集）、设备探测、执行器（成功流程/SHA256 拦截/失败即停/取消）、导出器（分区表解析/单分区导出/批量流/失败中止/取消）、BLE 模板与载荷构建（纯逻辑）。GUI 无自动化测试，仅冒烟截图脚本（`tests/gui_smoke.py`、`make_screenshots.py`，需 Xvfb）。
+测试覆盖：Profile 加载/校验/往返、分区安全策略（EFS 拒绝/引导链门槛/非法名）、计划生成（顺序/跳过/错误收集）、设备探测（含多设备枚举）、执行器（成功流程/SHA256 拦截/失败即停/取消/序列号定向）、导出器（分区表解析/单分区导出/批量流/失败中止/取消）、BLE 模板与载荷构建（纯逻辑）。GUI 无自动化测试，仅冒烟截图脚本（`tests/gui_smoke.py`、`make_screenshots.py`，需 Xvfb）。
+
+CI（GitHub Actions）在 Linux/Windows 双平台跑全部测试；Windows 作业用 PyInstaller 打包 exe——main 推送产出 artifact，`v*` tag 自动发布到 Releases。
 
 ## 项目结构
 

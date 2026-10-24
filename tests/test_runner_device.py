@@ -1,4 +1,5 @@
 """runner 定位/执行 + 设备探测测试（使用假 adb/fastboot）。"""
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,7 @@ from rustflashkit.core.runner import ToolLocator, ToolRunner
 from tests.fakes import calls, make_fake_tools
 
 
+@unittest.skipIf(os.name == "nt", "假工具依赖 POSIX shell")
 class TestRunnerAndDevice(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -43,6 +45,22 @@ class TestRunnerAndDevice(unittest.TestCase):
         info = svc.probe()
         self.assertEqual(info.mode, "bootloader")
         self.assertEqual(info.serial, "TESTSERIAL")
+
+    def test_probe_all_lists_both_channels(self):
+        svc = DeviceService(self.runner)
+        devs = svc.probe_all()
+        self.assertEqual([d.mode for d in devs], ["bootloader", "system"])
+        self.assertEqual([d.serial for d in devs], ["TESTSERIAL", "TESTSERIAL"])
+
+    def test_probe_all_empty_when_no_tools_found(self):
+        silent = self.tmp / "silent"
+        silent.write_text('#!/bin/sh\nexit 0\n')
+        silent.chmod(0o755)
+        self.locator.fastboot_path = str(silent)
+        # adb 仍会返回设备 → 只有一个 system 设备
+        svc = DeviceService(self.runner)
+        devs = svc.probe_all()
+        self.assertEqual([d.mode for d in devs], ["system"])
 
     def test_device_probe_system_when_no_fastboot_device(self):
         # 覆盖假 fastbot：让它报“无设备”，验证回退到 adb
