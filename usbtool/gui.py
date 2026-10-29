@@ -117,7 +117,8 @@ class App:
         tabs.add(frame, text='Wi-Fi / 短信通话导出')
         ttk.Label(frame, wraplength=840, justify='left', text=(
             '尚未实现。\n\n计划：通过 USB 网络连接 RustSimHub 设备的 Edge HTTPS 接口，以经主人批准配对的客户端身份'
-            '调用已有的 Wi-Fi 配置接口（带 45 秒自动回滚）；短信和通话记录通过已授权的查询接口导出。\n'
+            '调用已有接口重新连接 Wi-Fi（扫描选择或手动输入，带 45 秒自动回滚；不做 Wi-Fi 配置导入导出）；'
+            '短信和通话记录通过已授权的查询接口导出。\n'
             '不会绕过设备鉴权，也不会直接改写设备数据库。')).pack(anchor='w', padx=8, pady=8)
 
     # ---------- 动作 ----------
