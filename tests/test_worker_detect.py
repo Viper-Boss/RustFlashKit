@@ -155,7 +155,7 @@ def test_serial_read_timeout_is_capped():
     finally:
         sys.argv = old
     seen = []
-    original = serial_class.usbread
+    original, original_read = serial_class.usbread, serial_class.read
     try:
         serial_class.usbread = lambda self, resplen=None, timeout=0: seen.append(timeout)
         edl_link.cap_serial_reads()
@@ -163,7 +163,51 @@ def test_serial_read_timeout_is_capped():
         serial_class.usbread(None, 4, 1500)
         assert seen == [5.0]
     finally:
-        serial_class.usbread = original
+        serial_class.usbread, serial_class.read = original, original_read
+
+
+def test_wait_for_data_waits_until_bytes_arrive_or_limit():
+    from types import SimpleNamespace
+    from usbtool import edl_link
+    clock = [0.0]
+    device = SimpleNamespace(in_waiting=0)
+
+    def sleep(dt):
+        clock[0] += dt
+        if clock[0] >= 0.5:
+            device.in_waiting = 48  # Hello 在端口打开后约 0.5 秒到达
+
+    edl_link.wait_for_data(device, 3.0, clock=lambda: clock[0], sleep=sleep)
+    assert device.in_waiting == 48 and 0.5 <= clock[0] < 0.6
+    device.in_waiting, clock[0] = 0, 0.0
+    edl_link.wait_for_data(device, 1.0, clock=lambda: clock[0], sleep=lambda dt: clock.__setitem__(0, clock[0] + dt))
+    assert 1.0 <= clock[0] < 1.1  # 一直没有数据：最多等到上限
+
+
+def test_serial_read_waits_for_hello_before_xml_clamp():
+    import sys
+    from types import SimpleNamespace
+    from usbtool import edl_link
+    old = sys.argv
+    sys.argv = ['edl.py', 'printgpt']
+    try:
+        from edlclient.Library.Connection.seriallib import serial_class
+    finally:
+        sys.argv = old
+    original, original_read = serial_class.usbread, serial_class.read
+    try:
+        calls = []
+        edl_link.cap_serial_reads()
+        waits = []
+        real_wait = edl_link.wait_for_data
+        edl_link.wait_for_data = lambda device, limit: (waits.append(limit), setattr(device, 'in_waiting', 48))
+        fake = SimpleNamespace(xmlread=True, timeout=1500, device=SimpleNamespace(in_waiting=0),
+                               usbread=lambda resplen, timeout: calls.append(resplen) or b'x' * resplen)
+        assert serial_class.read(fake, 0x30, 1) == b'x' * 48
+        assert waits == [edl_link.DATA_WAIT] and calls == [48]
+    finally:
+        edl_link.wait_for_data = real_wait
+        serial_class.usbread, serial_class.read = original, original_read
 
 
 def test_main_writes_log_file(tmp_path, capsys, local_dir):

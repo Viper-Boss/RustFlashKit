@@ -2,6 +2,7 @@
 """通过 bkerler/edl（GPLv3，固定提交 1cda1a6）连接 9008 设备。只在工作子进程里使用。"""
 import hashlib
 import sys
+import time
 
 from . import guard
 from .policy import KNOWN_LOADERS, MSM8916_ID
@@ -18,8 +19,13 @@ class LinkError(RuntimeError):
 CONNECT_READ_CAP = 5.0
 DATA_READ_CAP = 30.0
 SERIAL_READ_CAP = [CONNECT_READ_CAP]
-MISSED_HELLO = ('EDL 连接失败。最常见原因：设备进入 9008 后只发一次 Sahara Hello，工具打开端口时已经错过。'
-                '请拔掉 USB、重新进入 9008，然后立即读取分区表；也可能是加载器与设备不匹配。详见日志。')
+MISSED_HELLO = ('EDL 连接失败（没有收到可识别的 Sahara Hello）。请看日志判断：'
+                '若是刚进 9008 就失败，可换用 WinUSB 驱动后选 USB 方式对比；若端口已开很久，可拔插重新进入 9008；'
+                '也可能是加载器与设备不匹配。未写入设备。')
+# edl 串口 read() 在 XML 模式下把长度截成“当前已到达的字节数”，端口刚打开、Hello 还没进缓冲区时就读 0 字节，
+# 随即判定为 error。这里在缓冲区为空时最多等这么久，再交给原实现。
+DATA_WAIT = 3.0
+POLL = 0.02
 
 
 def capped(timeout):
@@ -27,17 +33,29 @@ def capped(timeout):
     return cap if timeout is None or timeout > cap else timeout
 
 
+def wait_for_data(device, limit, clock=time.monotonic, sleep=time.sleep):
+    deadline = clock() + limit
+    while device.in_waiting == 0 and clock() < deadline:
+        sleep(POLL)
+
+
 def cap_serial_reads():
     from edlclient.Library.Connection.seriallib import serial_class
     if getattr(serial_class.usbread, '_usbtool_capped', False):
         return
-    original = serial_class.usbread
+    original_usbread, original_read = serial_class.usbread, serial_class.read
 
     def usbread(self, resplen=None, timeout=0):
-        return original(self, resplen, capped(timeout))
+        return original_usbread(self, resplen, capped(timeout))
+
+    def read(self, length=None, timeout=-1):
+        if self.xmlread and length:
+            wait_for_data(self.device, DATA_WAIT)
+        return original_read(self, length, timeout)
 
     usbread._usbtool_capped = True
     serial_class.usbread = usbread
+    serial_class.read = read
 
 
 def loader_digest(path):
