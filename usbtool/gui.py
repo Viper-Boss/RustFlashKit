@@ -114,7 +114,7 @@ class App:
 
     def build_later_tab(self, tabs):
         frame = ttk.Frame(tabs)
-        tabs.add(frame, text='网络 / 导入导出')
+        tabs.add(frame, text='Wi-Fi / 短信通话导出')
         ttk.Label(frame, wraplength=840, justify='left', text=(
             '尚未实现。\n\n计划：通过 USB 网络连接 RustSimHub 设备的 Edge HTTPS 接口，以经主人批准配对的客户端身份'
             '调用已有的 Wi-Fi 配置接口（带 45 秒自动回滚）；短信和通话记录通过已授权的查询接口导出。\n'
