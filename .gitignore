@@ -1,0 +1,6 @@
+.local/
+.private/
+/target/
+*.img
+*.bin
+*.mbn
