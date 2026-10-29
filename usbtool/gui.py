@@ -3,10 +3,11 @@
 import os
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from . import __version__, backup, detect, dryrun, paths, policy, worker
+from . import __version__, backup, detect, dryrun, header, paths, policy, theme, worker
 from .gui_wifi import WifiTab
 from .edl_link import loader_digest
 
@@ -20,19 +21,24 @@ class App:
         self.proc = None
         self.device = None
         self.layout = None
-        root.title(f'RustSimHub-UsbTool {__version__}（只读 + 演练，GPLv3）')
-        root.geometry('900x680')
-        root.minsize(760, 560)
+        root.title(f'RustSimHub USB 工具 {__version__}（GPLv3）')
+        scale = root.winfo_fpixels('1i') / 96  # 高 DPI 屏按比例放大窗口
+        height = min(int(900 * scale), int(root.winfo_screenheight() * 0.9))
+        root.geometry(f'{int(1040 * scale)}x{height}')
+        root.minsize(int(860 * scale), int(700 * scale))
+        family = theme.apply(root)
+        self.banner = header.Banner(root, family)
+        self.banner.pack(fill='x')
 
-        top = ttk.LabelFrame(root, text='连接')
-        top.pack(fill='x', padx=8, pady=6)
+        top = ttk.LabelFrame(root, text=' 9008 连接 ')
+        top.pack(fill='x', padx=12, pady=(10, 6))
         self.loader = tk.StringVar()
         ttk.Label(top, text='Firehose 加载器：').grid(row=0, column=0, sticky='w', padx=4, pady=3)
         ttk.Entry(top, textvariable=self.loader).grid(row=0, column=1, sticky='ew', padx=4)
         ttk.Button(top, text='选择…', command=self.pick_loader).grid(row=0, column=2, padx=4)
         self.loader_label = ttk.Label(top, text='未选择（需要你自己提供 prog_emmc_firehose_8916.mbn）')
         self.loader_label.grid(row=1, column=1, sticky='w', padx=4)
-        ttk.Button(top, text='检测 9008 设备', command=self.detect).grid(row=2, column=0, padx=4, pady=3, sticky='w')
+        ttk.Button(top, text='检测 9008 设备', command=self.detect, style='Accent.TButton').grid(row=2, column=0, padx=4, pady=3, sticky='w')
         self.device_var = tk.StringVar()
         self.device_box = ttk.Combobox(top, textvariable=self.device_var, state='readonly')
         self.device_box.grid(row=2, column=1, sticky='ew', padx=4)
@@ -42,19 +48,19 @@ class App:
         self.devices = []
 
         tabs = ttk.Notebook(root)
-        tabs.pack(fill='both', expand=True, padx=8)
+        tabs.pack(fill='both', expand=True, padx=12)
         self.build_backup_tab(tabs)
         self.build_dryrun_tab(tabs)
         WifiTab(tabs, self)
         self.build_later_tab(tabs)
 
         bottom = ttk.Frame(root)
-        bottom.pack(fill='both', padx=8, pady=6)
-        self.progress = ttk.Progressbar(bottom, maximum=1000)
+        bottom.pack(side='bottom', fill='x', padx=12, pady=8, before=tabs)
+        self.progress = ttk.Progressbar(bottom, maximum=1000, style='Accent.Horizontal.TProgressbar')
         self.progress.pack(fill='x')
-        self.status = ttk.Label(bottom, text='就绪。本版本不包含任何写入设备的功能。')
+        self.status = ttk.Label(bottom, text='就绪。9008 部分只读，不会写入任何分区。', style='Muted.TLabel')
         self.status.pack(fill='x')
-        self.log = tk.Text(bottom, height=10, wrap='word')
+        self.log = theme.text_widget(bottom, height=5, wrap='word')
         self.log.pack(fill='both', expand=True)
         self.cancel_button = ttk.Button(bottom, text='取消当前操作', command=self.cancel, state='disabled')
         self.cancel_button.pack(anchor='e', pady=3)
@@ -63,21 +69,21 @@ class App:
     # ---------- 界面构造 ----------
     def build_backup_tab(self, tabs):
         frame = ttk.Frame(tabs)
-        tabs.add(frame, text='分区表与备份（只读）')
+        tabs.add(frame, text='分区表与备份')
         bar = ttk.Frame(frame)
         bar.pack(fill='x', pady=4)
-        self.probe_button = ttk.Button(bar, text='读取分区表', command=self.probe)
+        self.probe_button = ttk.Button(bar, text='读取分区表', command=self.probe, style='Accent.TButton')
         self.probe_button.pack(side='left', padx=4)
         self.full_disk = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text='同时全盘备份', variable=self.full_disk).pack(side='left', padx=4)
         self.reread = tk.BooleanVar(value=True)
-        ttk.Checkbutton(bar, text='二次回读校验（耗时加倍，推荐）', variable=self.reread).pack(side='left', padx=4)
-        self.backup_button = ttk.Button(bar, text='备份所选分区', command=self.start_backup, state='disabled')
+        ttk.Checkbutton(bar, text='二次回读校验（推荐）', variable=self.reread).pack(side='left', padx=4)
+        self.backup_button = ttk.Button(bar, text='备份所选分区', command=self.start_backup, state='disabled', style='Accent.TButton')
         self.backup_button.pack(side='left', padx=4)
-        ttk.Button(bar, text='复核已有备份…', command=self.verify_existing).pack(side='left', padx=4)
-        ttk.Button(bar, text='打开备份目录', command=lambda: self.open_folder(paths.backups_dir())).pack(side='right', padx=4)
+        ttk.Button(bar, text='复核备份…', command=self.verify_existing).pack(side='left', padx=4)
+        ttk.Button(bar, text='打开目录', command=lambda: self.open_folder(paths.backups_dir())).pack(side='right', padx=4)
         columns = ('index', 'name', 'first', 'size', 'note')
-        self.tree = ttk.Treeview(frame, columns=columns, show='headings', selectmode='extended')
+        self.tree = ttk.Treeview(frame, columns=columns, show='headings', selectmode='extended', height=9)
         for col, text, width in zip(columns, ('序号', '名称', '起始扇区', '大小', '说明'), (50, 130, 110, 120, 380)):
             self.tree.heading(col, text=text)
             self.tree.column(col, width=width, anchor='w')
@@ -86,7 +92,7 @@ class App:
 
     def build_dryrun_tab(self, tabs):
         frame = ttk.Frame(tabs)
-        tabs.add(frame, text='刷写演练（不写入）')
+        tabs.add(frame, text='刷写演练')
         ttk.Label(frame, text='演练只核对：目标分区是否允许、镜像大小/格式/摘要、是否已有同一设备的已校验备份。不会连接或写入设备。',
                   wraplength=840).pack(anchor='w', padx=4, pady=4)
         row = ttk.Frame(frame)
@@ -109,9 +115,9 @@ class App:
             ttk.Entry(r, textvariable=digest, width=24).pack(side='left', padx=2)
             self.write_rows.append((target, enabled, image, digest))
         ttk.Label(frame, text=f'禁写（硬编码，不可更改）：{", ".join(sorted(policy.DENIED_NAMES))}',
-                  wraplength=840, foreground='#a00').pack(anchor='w', padx=4, pady=4)
-        ttk.Button(frame, text='运行演练', command=self.run_dryrun).pack(anchor='w', padx=4)
-        self.dry_text = tk.Text(frame, height=10, wrap='word')
+                  wraplength=880, style='Danger.TLabel').pack(anchor='w', padx=4, pady=4)
+        ttk.Button(frame, text='运行演练', command=self.run_dryrun, style='Accent.TButton').pack(anchor='w', padx=4)
+        self.dry_text = theme.text_widget(frame, height=10, wrap='word')
         self.dry_text.pack(fill='both', expand=True, padx=4, pady=4)
 
     def build_later_tab(self, tabs):
@@ -122,8 +128,11 @@ class App:
             '不会绕过设备鉴权，也不会直接改写设备数据库。')).pack(anchor='w', padx=8, pady=8)
 
     # ---------- 动作 ----------
-    def append_log(self, text):
-        self.log.insert('end', text + '\n')
+    def append_log(self, text, tag=None):
+        if tag is None and ('失败' in text or text.startswith('错误')):
+            tag = 'error'
+        self.log.insert('end', time.strftime('%H:%M:%S '), 'time')
+        self.log.insert('end', text + '\n', tag or ())
         self.log.see('end')
 
     def pick_loader(self):
@@ -143,6 +152,10 @@ class App:
         else:
             self.device_var.set('')
         self.append_log(f'找到 {len(self.devices)} 个 9008 设备' + ('' if names else '（确认已按键进入 9008 并安装驱动）'))
+        if names:
+            self.banner.say('happy', f'找到 {len(names)} 个 9008 设备')
+        else:
+            self.banner.say('worried', '没有找到 9008 设备')
         for n in notes:
             self.append_log('提示：' + n)
 
@@ -192,6 +205,7 @@ class App:
 
     def launch(self, job, timeout):
         self.append_log(f'开始：{job["action"]}')
+        self.banner.say('busy')
         self.proc = worker.start(job)
         self.cancel_button.config(state='normal')
         self.probe_button.config(state='disabled')
@@ -239,12 +253,15 @@ class App:
             self.append_log(f'芯片：{chip}  HWID {self.device.get("hwid")}')
         elif kind == 'result' and event['action'] == 'probe':
             self.show_layout(event['layout'], event['warnings'])
+            self.banner.say('happy', '分区表已读取：主备 GPT 一致')
         elif kind == 'result':
-            self.append_log(f'备份完成并校验通过：{event["folder"]}')
+            self.append_log(f'备份完成并校验通过：{event["folder"]}', 'ok')
+            self.banner.say('happy')
             self.backup_dir.set(event['folder'])
             messagebox.showinfo('备份完成', f'备份已保存并校验：\n{event["folder"]}')
         elif kind == 'error':
             self.append_log('错误：' + event['message'])
+            self.banner.say('worried')
             messagebox.showerror('操作失败', event['message'] + '\n\n没有自动重试，也没有自动重启设备。')
         elif kind == 'exit' and event['proc'] is self.proc:
             self.proc = None
@@ -298,6 +315,8 @@ class App:
         path = dryrun.save_report(report, paths.dryruns_dir())
         self.dry_text.delete('1.0', 'end')
         self.dry_text.insert('end', dryrun.format_report(report) + f'\n\n报告已保存：{path}\n本版本没有真实写入功能。')
+        self.banner.say('happy' if report['passed'] else 'worried',
+                        '演练通过（未写入设备）' if report['passed'] else '演练未通过，请查看报告')
 
     @staticmethod
     def open_folder(path):
@@ -313,6 +332,12 @@ def human(n):
 
 
 def main():
+    if os.name == 'nt':
+        try:  # 声明支持高 DPI，避免 Windows 位图拉伸导致发糊
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except (AttributeError, OSError):
+            pass
     root = tk.Tk()
     App(root)
     root.mainloop()

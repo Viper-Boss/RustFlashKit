@@ -12,7 +12,7 @@
 
 | 期 | 状态 |
 |---|---|
-| M0 骨架 / 构建 exe / 许可证 | 完成：`build.ps1` 先跑测试再生成 `dist/RustSimHub-UsbTool.exe`；exe 的 `selfcheck`、`verify`、`dryrun` 已冒烟通过，界面窗口能启动 |
+| M0 骨架 / 构建 exe / 许可证 | 完成（2026-10-29 界面改为浅色简洁风格，支持高 DPI）：`build.ps1` 先跑测试再生成 `dist/RustSimHub-UsbTool.exe`；exe 的 `selfcheck`、`verify`、`dryrun` 已冒烟通过，界面窗口能启动 |
 | M1 只读 EDL | 代码完成，模拟测试通过；**未经实机验证**（需要用户按键进入 9008） |
 | M2 演练模式 | 完成，测试通过 |
 | M3 真实写入 | 未开始 |

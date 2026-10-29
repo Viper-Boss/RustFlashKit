@@ -6,7 +6,7 @@ import tkinter as tk
 import uuid
 from tkinter import messagebox, ttk
 
-from . import edge, edge_store
+from . import edge, edge_store, theme
 
 POLL_MS = 3000
 
@@ -47,7 +47,7 @@ class WifiTab:
         left.pack(side='left', fill='both', expand=True)
         self.list_button = ttk.Button(left, text='读取设备已发现的网络', command=self.load_networks, state='disabled')
         self.list_button.pack(anchor='w')
-        self.listbox = tk.Listbox(left, height=8)
+        self.listbox = theme.listbox(left, height=8)
         self.listbox.pack(fill='both', expand=True, pady=2)
         self.listbox.bind('<<ListboxSelect>>', self.pick_network)
         right = ttk.Frame(body)
@@ -58,13 +58,13 @@ class WifiTab:
         ttk.Label(right, text='密码（WPA2 个人）').pack(anchor='w', pady=(6, 0))
         self.passphrase = tk.StringVar()
         ttk.Entry(right, textvariable=self.passphrase, width=30, show='•').pack(anchor='w')
-        self.begin_button = ttk.Button(right, text='试连接', command=self.begin, state='disabled')
+        self.begin_button = ttk.Button(right, text='试连接', command=self.begin, state='disabled', style='Accent.TButton')
         self.begin_button.pack(anchor='w', pady=6)
         self.state_label = ttk.Label(right, text='没有试连接', wraplength=260)
         self.state_label.pack(anchor='w')
         buttons = ttk.Frame(right)
         buttons.pack(anchor='w', pady=4)
-        self.confirm_button = ttk.Button(buttons, text='确认保存', command=lambda: self.action('wifi_confirm'), state='disabled')
+        self.confirm_button = ttk.Button(buttons, text='确认保存', command=lambda: self.action('wifi_confirm'), state='disabled', style='Accent.TButton')
         self.confirm_button.pack(side='left')
         self.cancel_button = ttk.Button(buttons, text='取消试连接', command=lambda: self.action('wifi_cancel'), state='disabled')
         self.cancel_button.pack(side='left', padx=4)
@@ -86,6 +86,7 @@ class WifiTab:
 
     def failed(self, label, err):
         self.app.append_log(f'{label}失败：{err}')
+        self.app.banner.say('worried')
         if isinstance(err, edge.Uncertain):
             self.state_label.config(text='结果不明：请求可能已到达设备。只能“重新查询”，不会自动重做。设备 45 秒计时回退仍有效。')
             self.query_button.config(state='normal')
@@ -134,6 +135,7 @@ class WifiTab:
             self.pair_button.config(state='normal')
             self.login_button.config(state='normal')
             self.app.append_log('设备已核对')
+            self.app.banner.say('wifi')
 
         self.background(work, done, '连接设备')
 
@@ -223,6 +225,14 @@ class WifiTab:
         self.confirm_button.config(state='normal' if trial['state'] == 'ready' else 'disabled')
         self.cancel_button.config(state='disabled' if terminal else 'normal')
         self.query_button.config(state='normal')
+        if trial['state'] == 'ready':
+            self.app.banner.say('wifi', '已连上新 Wi-Fi，请确认保存')
+        elif trial['state'] == 'saved':
+            self.app.banner.say('happy', '新 Wi-Fi 已保存')
+        elif trial['state'] == 'rolled_back':
+            self.app.banner.say('idle', '已恢复原网络')
+        elif trial['state'] == 'unknown':
+            self.app.banner.say('worried', '结果不明，请检查设备（不会自动重试）')
         if terminal:
             self.pending_begin = None
             self.begin_button.config(state='normal')
