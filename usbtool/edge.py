@@ -202,7 +202,8 @@ class Transport:
             raise EdgeError('响应与请求不匹配')
         result = value.get('result')
         if isinstance(result, dict) and 'error' in result:
-            raise CoreRefused(f'设备拒绝：{result["error"]}（请检查授权、登录和设备状态）')
+            raise CoreRefused(f'设备拒绝（{result["error"]}）。设备不区分原因，可能是：还没被主人批准或已被撤销、登录已过期、'
+                              '配对窗口已关闭、已有未结束的试连接或正在通话、输入不合规。')
         return result
 
 

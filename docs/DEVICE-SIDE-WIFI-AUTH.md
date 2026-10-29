@@ -11,3 +11,7 @@
 3. **USB 上可访问 Edge**：工具连接 `10.55.0.2:8443`（usb0），发送的 Host/Origin 是证书里的 `.local` 网址。需要确认日常 Edge 也监听 usb0 地址（`additional_listen_ips` 包含 10.55.0.2），并且证书 SAN 含该 `.local` 名称。
 
 部署到设备需要用户逐次批准。电脑端：Windows 10/11 自带 NCM 驱动，棒子插上后会出现一块新网卡，需要手动设为 `10.55.0.1`、掩码 `255.255.255.248`、不设网关（设备端没有 DHCP）。
+
+## 进展
+
+2026-10-29：三处已在 RustSimHub PR #68（https://github.com/Viper-Boss/RustSimHub/pull/68，分支 `claude/wifi-tool-auth-e30f13`，提交 `70a6241`）实现，本地测试通过；CI 因 GitHub 账户付费问题未运行；未合并、未部署、未连真实设备。对接差异：Core 拒绝统一为 `{"ok":false,"error":"denied"}`，工具已改为列出可能原因；其他字段与工具假设一致。
