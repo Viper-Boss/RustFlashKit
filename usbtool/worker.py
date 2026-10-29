@@ -4,8 +4,10 @@
 放在子进程里是为了：edl 的输出/全局状态不污染界面；超时或取消时可以直接结束进程。
 """
 import json
+import os
 import subprocess
 import sys
+import threading
 import time
 import traceback
 
@@ -13,11 +15,79 @@ from . import backup, paths, policy
 
 PREFIX = '@@USBTOOL '
 ACTIONS = ('probe', 'backup')
+# 看门狗时限（秒）：连接阶段为整体上限；读取阶段为“多久没有任何进展”的上限。
+CONNECT_LIMIT = 90
+STALL_LIMIT = 120
+WATCHDOG_EXIT = 4
+MISSED_HELLO_HINT = '若是刚连接：设备进入 9008 后只发一次 Sahara Hello，请拔掉 USB 重新进入 9008 后立即操作。'
+WATCHDOG = None
+
+
+class Watchdog:
+    """阶段超时后回报错误并直接结束进程（edl 的阻塞读无法从外部打断）。不重试、不重启设备。"""
+
+    def __init__(self, on_expire=None, interval=1.0):
+        self.lock = threading.Lock()
+        self.phase, self.limit, self.last = None, None, time.monotonic()
+        self.on_expire = on_expire or self.expire
+        self.interval = interval
+        self.stopped = threading.Event()
+        threading.Thread(target=self.loop, daemon=True).start()
+
+    def arm(self, phase, limit):
+        with self.lock:
+            self.phase, self.limit, self.last = phase, limit, time.monotonic()
+
+    def kick(self):
+        with self.lock:
+            self.last = time.monotonic()
+
+    def stop(self):
+        self.stopped.set()
+
+    def loop(self):
+        while not self.stopped.wait(self.interval):
+            with self.lock:
+                expired = self.limit is not None and time.monotonic() - self.last > self.limit
+                phase, limit = self.phase, self.limit
+            if expired:
+                self.on_expire(phase, limit)
+                return
+
+    @staticmethod
+    def expire(phase, limit):
+        hint = MISSED_HELLO_HINT if phase == 'connect' else '读取停滞，设备可能已断开或卡住。'
+        emit('error', message=f'{phase} 阶段超过 {limit} 秒没有进展，已停止。{hint}未写入设备，未自动重试。')
+        os._exit(WATCHDOG_EXIT)
 
 
 def emit(kind, **data):
     sys.stdout.write(PREFIX + json.dumps({'type': kind, **data}, ensure_ascii=False) + '\n')
     sys.stdout.flush()
+    if WATCHDOG is not None and kind in ('progress', 'log'):
+        WATCHDOG.kick()
+
+
+class Tee:
+    """把输出同时写到原输出和日志文件，排查时不依赖界面或控制台。"""
+
+    def __init__(self, primary, log):
+        self.primary, self.log = primary, log
+
+    def write(self, data):
+        self.log.write(data)
+        self.log.flush()
+        if self.primary is not None:
+            self.primary.write(data)
+        return len(data)
+
+    def flush(self):
+        self.log.flush()
+        if self.primary is not None:
+            self.primary.flush()
+
+    def isatty(self):
+        return False
 
 
 def validate_job(job):
@@ -38,7 +108,11 @@ def run(job, link_factory=None):
     emit('log', message=f'加载器：{label}（sha256 {digest[:16]}…）')
     if link_factory is None:
         link_factory = edl_link.EdlLink
+    if WATCHDOG is not None:
+        WATCHDOG.arm('connect', CONNECT_LIMIT)
     link = link_factory(job['loader'], job['mode'], job.get('port', ''), log=lambda m: emit('log', message=m))
+    if WATCHDOG is not None:
+        WATCHDOG.arm('read', STALL_LIMIT)
     try:
         device = link.device_info()
         device['loader_sha256'] = digest
@@ -65,9 +139,23 @@ def run(job, link_factory=None):
         link.close()
 
 
-def main(job_path):
-    if sys.stdout is not None and hasattr(sys.stdout, 'reconfigure'):
-        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+def log_path(job_path):
+    folder = paths.local_dir() / 'logs'
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / (os.path.splitext(os.path.basename(job_path))[0] + '.log')
+
+
+def main(job_path, watchdog=True):
+    global WATCHDOG
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8', errors='replace')
+    log = open(log_path(job_path), 'a', encoding='utf-8')
+    old = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = Tee(old[0], log), Tee(old[1], log)
+    emit('log', message=f'日志文件：{log.name}')
+    if watchdog:
+        WATCHDOG = Watchdog()
     try:
         with open(job_path, encoding='utf-8') as stream:
             job = json.load(stream)
@@ -76,6 +164,12 @@ def main(job_path):
     except Exception as err:  # 所有失败都回报给界面，不自动重试、不自动重启设备
         emit('error', message=str(err), detail=traceback.format_exc())
         return 1
+    finally:
+        if WATCHDOG is not None:
+            WATCHDOG.stop()
+            WATCHDOG = None
+        sys.stdout, sys.stderr = old
+        log.close()
 
 
 def worker_command(job_path):

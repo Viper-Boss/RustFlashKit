@@ -119,3 +119,56 @@ def test_selfcheck_patches_real_edl(capsys):
     from usbtool import cli
     assert cli.main(['selfcheck']) == 0
     assert '已禁用' in capsys.readouterr().out
+
+
+def test_watchdog_expires_without_progress():
+    import threading
+    fired = threading.Event()
+    seen = []
+    dog = worker.Watchdog(on_expire=lambda phase, limit: (seen.append((phase, limit)), fired.set()), interval=0.02)
+    dog.arm('connect', 0.1)
+    assert fired.wait(2) and seen == [('connect', 0.1)]
+    dog.stop()
+
+
+def test_watchdog_kick_keeps_it_alive():
+    import time
+    fired = []
+    dog = worker.Watchdog(on_expire=lambda *a: fired.append(a), interval=0.02)
+    dog.arm('read', 0.3)
+    for _ in range(10):
+        time.sleep(0.05)
+        dog.kick()
+    dog.stop()
+    assert fired == []
+
+
+def test_serial_read_timeout_is_capped():
+    import sys
+    from usbtool import edl_link
+    edl_link.SERIAL_READ_CAP[0] = 5.0
+    assert edl_link.capped(None) == 5.0 and edl_link.capped(1500) == 5.0 and edl_link.capped(1) == 1
+    old = sys.argv
+    sys.argv = ['edl.py', 'printgpt']
+    try:
+        from edlclient.Library.Connection.seriallib import serial_class
+    finally:
+        sys.argv = old
+    seen = []
+    original = serial_class.usbread
+    try:
+        serial_class.usbread = lambda self, resplen=None, timeout=0: seen.append(timeout)
+        edl_link.cap_serial_reads()
+        edl_link.cap_serial_reads()  # 重复调用不叠加
+        serial_class.usbread(None, 4, 1500)
+        assert seen == [5.0]
+    finally:
+        serial_class.usbread = original
+
+
+def test_main_writes_log_file(tmp_path, capsys, local_dir):
+    path = tmp_path / 'job-x.json'
+    path.write_text(json.dumps({'action': 'erase', 'mode': 'usb'}), encoding='utf-8')
+    assert worker.main(str(path)) == 1
+    log = (local_dir / 'logs' / 'job-x.log').read_text(encoding='utf-8')
+    assert '日志文件' in log and '"type": "error"' in log

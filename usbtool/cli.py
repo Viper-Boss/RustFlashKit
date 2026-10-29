@@ -2,14 +2,35 @@
 """命令行入口（与界面功能相同，便于脚本和排错）。"""
 import argparse
 import json
+import os
 import sys
+import threading
 
 from . import backup, detect, dryrun, paths, worker
 
 
-def _run_job(job):
+PROBE_TIMEOUT = 300  # 秒；与界面一致。工作进程自身另有看门狗
+
+
+def _run_job(job, timeout=None):
     proc = worker.start(job)
     code = 1
+    timer = None
+    if timeout:
+        def expire():
+            print(f'\n错误：超过 {timeout} 秒未完成，已结束工作进程（未写入设备，未自动重试）', file=sys.stderr, flush=True)
+            proc.kill()
+        timer = threading.Timer(timeout, expire)
+        timer.daemon = True
+        timer.start()
+    try:
+        return _pump(proc, code)
+    finally:
+        if timer:
+            timer.cancel()
+
+
+def _pump(proc, code):
     for line in proc.stdout:
         event = worker.parse_line(line)
         kind = event.get('type')
@@ -104,11 +125,11 @@ def main(argv):
                 print(f'需要恰好一个 9008 设备，现在找到 {len(devices)} 个', file=sys.stderr)
                 return 1
             mode, port = devices[0]['mode'], devices[0]['port']
-        job = {'action': args.command, 'loader': args.loader, 'allow_unknown_loader': args.allow_unknown_loader,
+        job = {'action': args.command, 'loader': os.path.abspath(args.loader), 'allow_unknown_loader': args.allow_unknown_loader,
                'mode': mode, 'port': port, 'reset_after': args.reset_after}
         if args.command == 'backup':
             job.update(partitions=args.partition, reread=not args.no_reread, backup_base=str(paths.backups_dir()))
-        return _run_job(job)
+        return _run_job(job, PROBE_TIMEOUT if args.command == 'probe' else None)
     if args.command == 'verify':
         manifest, errors = backup.verify_backup(args.folder)
         for e in errors:

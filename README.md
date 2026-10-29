@@ -26,15 +26,17 @@
    - “刷写演练”页：选择写前备份目录和镜像，点击“运行演练”。报告保存在 `.local\dryruns\`。
 4. 默认操作结束后**不会**重启设备。如需让它回到正常系统，请勾选“完成后让设备正常重启”，或者拔插 USB。
 
+命令行请用控制台版 `RustSimHub-UsbTool-cli.exe`（图形版从命令行运行时看不到输出）。每次任务的完整日志在 exe 同目录 `.local\logs\`。设备进入 9008 后只发一次 Sahara Hello，请进入后尽快读取；连接阶段超过 90 秒、读取停滞超过 120 秒都会自动停止并报告（不写入、不重试）。
+
 命令行（功能相同）：
 
 ```
-RustSimHub-UsbTool.exe selfcheck
-RustSimHub-UsbTool.exe detect
-RustSimHub-UsbTool.exe probe  --loader prog_emmc_firehose_8916.mbn
-RustSimHub-UsbTool.exe backup --loader prog_emmc_firehose_8916.mbn --partition boot --partition __full_disk__
-RustSimHub-UsbTool.exe verify .local\backups\20261029-120000
-RustSimHub-UsbTool.exe dryrun --backup-dir .local\backups\20261029-120000 --write boot=boot.img
+RustSimHub-UsbTool-cli.exe selfcheck
+RustSimHub-UsbTool-cli.exe detect
+RustSimHub-UsbTool-cli.exe probe  --loader prog_emmc_firehose_8916.mbn
+RustSimHub-UsbTool-cli.exe backup --loader prog_emmc_firehose_8916.mbn --partition boot --partition __full_disk__
+RustSimHub-UsbTool-cli.exe verify .local\backups\20261029-120000
+RustSimHub-UsbTool-cli.exe dryrun --backup-dir .local\backups\20261029-120000 --write boot=boot.img
 ```
 
 ## Wi-Fi 重连（经 USB）
