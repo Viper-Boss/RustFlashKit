@@ -30,6 +30,9 @@ class FakeTarget:
         self.raw = None
         self.writes_enabled = False
         self.fault = None
+        self.max_payload = None
+        self.pending_zlp = False
+        self.bad_stream = False
         self.out = self.Out(self)
         self.inp = self.In(self)
 
@@ -50,6 +53,7 @@ class FakeTarget:
                 cmd = ET.fromstring(data)[0]
                 if cmd.tag == 'configure':
                     t.writes_enabled = cmd.get('SkipWrite') == '0'
+                    t.max_payload = int(cmd.get('MaxPayloadSizeToTargetInBytes'))
                     t.reply('ACK')
                 elif cmd.tag == 'program':
                     if t.fault == 'nak_program' or not t.writes_enabled:
@@ -58,15 +62,29 @@ class FakeTarget:
                     if t.fault == 'silent':
                         return len(data)
                     t.raw = [int(cmd.get('start_sector')), int(cmd.get('num_partition_sectors')), bytearray()]
+                    t.pending_zlp = t.bad_stream = False
                     t.reply('ACK', 'false' if t.fault == 'no_rawmode' else 'true')
                 return len(data)
             if not data:
+                t.pending_zlp = True
                 return 0
             if t.fault == 'short_write':
                 return len(data) - 512
-            t.raw[2].extend(data)
             start, count, buf = t.raw
-            if len(buf) == count * 512:
+            # 模拟真机现象（2026-10-30）：加载器每次请求 min(MaxPayload, 剩余)；上一块后的零长度包会被下一次请求读走。
+            # 请求等于 MaxPayload 时无害（tz 步骤实测正常），请求小于 MaxPayload 时读到 0 字节 -> 出错、不写入。
+            request = min(t.max_payload, count * 512 - len(buf))
+            if t.pending_zlp and request < t.max_payload:
+                t.bad_stream = True
+            t.pending_zlp = False
+            if len(data) != request:
+                t.bad_stream = True
+            buf.extend(data)
+            if len(buf) >= count * 512:
+                if t.bad_stream:
+                    t.raw = None
+                    t.reply('NAK', 'false', log='Read back verify failed at sector 1703271967,num sectors 0')
+                    return len(data)
                 if t.fault == 'corrupt':
                     buf[100] ^= 1
                 t.disk.data[start * 512:(start + count) * 512] = buf
@@ -321,3 +339,32 @@ def test_keep_reads_saves_second_pass(stick, tmp_path):
     manifest = backup.run_backup(stick.read, folder, ['tz'], keep_reads=True, log=lambda m: None)
     item = manifest['items'][0]
     assert (folder / item['read2_file']).read_bytes() == stick.range(1410, 1509)
+
+
+@pytest.mark.parametrize('sizes,expected', [
+    ([34 * 512, 33 * 512], 512), ([524288], 16384), ([1 << 20], 16384),
+    ([135249408], 512), ([2816454656], 4096), ([3 * 512], 512),
+])
+def test_chunk_size_divides_every_segment(sizes, expected):
+    segs = [{'sectors': n // 512} for n in sizes]
+    assert firehose_write.chunk_size(segs) == expected
+
+
+def test_old_fixed_16k_chunks_reproduce_real_gpt_nak(stick, tmp_path):
+    """按改之前的写法（MaxPayload 16384，GPT 主表 16384+1024，每块后补零长度包）手动发包，
+    模拟目标重现真机现象：最后收到 NAK，什么都没写。新写法同一步可以正常写入。"""
+    primary, _back = build_new_gpt(stick)
+    target = FakeTarget(stick)
+    before = bytes(stick.data)
+    target.out.write(firehose_write.configure_xml(16384))
+    assert b'ACK' in target.inp.read(4096)
+    target.out.write(firehose_write.program_xml(0, 34))
+    assert b'rawmode="true"' in target.inp.read(4096)
+    for block in (primary[:16384], primary[16384:]):
+        target.out.write(block)
+        target.out.write(b'')
+    reply, logs = firehose_write.decode_reply(target.inp.read(4096))
+    assert reply['value'] == 'NAK' and 'Read back verify failed' in logs[0]
+    assert bytes(stick.data) == before
+    report, _ = run(gpt_plan(tmp_path, stick), stick, step='gpt')
+    assert report['status'] == 'verified' and report['transcript'][0]['max_payload'] == 512

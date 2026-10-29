@@ -94,9 +94,19 @@ def write_once(endpoint, data):
     return count
 
 
-def configure_xml():
+def chunk_size(segments):
+    """选一个能整除每段长度的块大小（≤ MAX_PAYLOAD 的 2 的幂，最小 512），并用它作为 MaxPayload。
+    这样每一块都正好等于加载器请求的大小，再补零长度包——这是真机上验证过的模式（tz 步骤）。
+    2026-10-30 真机：GPT 主表 17408 字节按 16384+1024 发送时，最后一块小于 MaxPayload，加载器回 NAK 且未写入。"""
+    size = MAX_PAYLOAD
+    while size > 512 and any((seg['sectors'] * 512) % size for seg in segments):
+        size //= 2
+    return size
+
+
+def configure_xml(payload=MAX_PAYLOAD):
     return ('<?xml version="1.0" ?><data><configure MemoryName="eMMC" Verbose="0" AlwaysValidate="0" '
-            f'MaxDigestTableSizeInBytes="2048" MaxPayloadSizeToTargetInBytes="{MAX_PAYLOAD}" ZLPAwareHost="1" '
+            f'MaxDigestTableSizeInBytes="2048" MaxPayloadSizeToTargetInBytes="{payload}" ZLPAwareHost="1" '
             'SkipStorageInit="0" SkipWrite="0" /></data>').encode()
 
 
@@ -116,6 +126,7 @@ class WriteSession:
         self.phase = 'ready'
         self.transcript = []
         self.index = 0
+        self.chunk = chunk_size(self.segments)
 
     def fail(self, message):
         phase, self.phase = self.phase, 'failed'
@@ -141,7 +152,8 @@ class WriteSession:
         if self.phase != 'ready':
             self.fail('configure 只能在会话开始时发送一次')
         self.phase = 'configure-sent'
-        self._send(configure_xml(), 'configure')
+        self.transcript.append({'phase': self.phase, 'step': 'configure', 'max_payload': self.chunk})
+        self._send(configure_xml(self.chunk), 'configure')
         reply = self._reply('configure')
         if reply.get('value') != 'ACK' or reply.get('rawmode') not in (None, 'false'):
             self.fail(f'写入配置被拒绝（{reply}）；不协商、不重试')
@@ -163,8 +175,8 @@ class WriteSession:
         sent = 0
         h = hashlib.sha256()
         while sent < total:
-            block = stream.read(min(MAX_PAYLOAD, total - sent))
-            if len(block) == 0 or len(block) % 512:
+            block = stream.read(self.chunk)
+            if len(block) != self.chunk:
                 self.fail(f'{label}：载荷文件提前结束或长度异常')
             self._send(block, f'{label} 数据 @{sent}')
             self._send(b'', f'{label} 零长度包 @{sent}')
