@@ -216,3 +216,25 @@ def test_main_writes_log_file(tmp_path, capsys, local_dir):
     assert worker.main(str(path)) == 1
     log = (local_dir / 'logs' / 'job-x.log').read_text(encoding='utf-8')
     assert '日志文件' in log and '"type": "error"' in log
+
+
+def test_usb_mode_uses_explicit_libusb1_backend():
+    import sys
+    from usbtool import detect as detect_module, edl_link
+    old = sys.argv
+    sys.argv = ['edl.py', 'printgpt']
+    try:
+        from edlclient.Library.Connection.usblib import usb_class
+    finally:
+        sys.argv = old
+    original = usb_class.__init__
+    try:
+        sentinel = object()
+        edl_link.use_usb_backend(sentinel)
+        edl_link.use_usb_backend(sentinel)  # 重复调用不嵌套
+        dev = usb_class(portconfig=[[0x05c6, 0x9008, -1]])
+        assert dev.backend is sentinel
+    finally:
+        usb_class.__init__ = original
+    backend = detect_module.libusb_backend()
+    assert backend is not None and type(backend).__module__ == 'usb.backend.libusb1'

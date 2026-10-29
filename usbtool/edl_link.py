@@ -4,7 +4,7 @@ import hashlib
 import sys
 import time
 
-from . import guard
+from . import detect, guard
 from .policy import KNOWN_LOADERS, MSM8916_ID
 
 EDL_REVISION = '1cda1a616748d608667b2d13b73a28d3197ceb45'
@@ -58,6 +58,20 @@ def cap_serial_reads():
     serial_class.read = read
 
 
+def use_usb_backend(backend):
+    """edl 在 Windows 上把 usb_class.backend 设为 None，pyusb 找不到 libusb-1.0 时会退回 libusb0，
+    而 libusb0 看不到 WinUSB 驱动下的 9008。这里固定使用与 detect 相同、显式加载的 libusb-1.0 后端。"""
+    from edlclient.Library.Connection.usblib import usb_class
+    original = getattr(usb_class.__init__, '_usbtool_original', usb_class.__init__)
+
+    def __init__(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        self.backend = backend
+
+    __init__._usbtool_original = original
+    usb_class.__init__ = __init__
+
+
 def loader_digest(path):
     h = hashlib.sha256()
     with open(path, 'rb') as stream:
@@ -95,7 +109,13 @@ class EdlLink:
                      'printgpt': False})
         if mode == 'serial':
             args.update({'--serial': True, '--portname': '\\\\.\\' + port if not port.startswith('\\') else port})
-        elif mode != 'usb':
+        elif mode == 'usb':
+            backend = detect.libusb_backend()
+            if backend is None:
+                raise LinkError('无法加载 libusb-1.0，USB（WinUSB）方式不可用')
+            use_usb_backend(backend)
+            log('USB 方式：使用 edl 自带的 libusb-1.0（WinUSB 驱动）')
+        else:
             raise LinkError(f'未知连接方式 {mode}')
         self.client = edl_module.main(args)
         SERIAL_READ_CAP[0] = CONNECT_READ_CAP
