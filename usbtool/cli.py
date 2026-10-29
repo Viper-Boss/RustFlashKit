@@ -99,6 +99,7 @@ def main(argv):
         if name == 'backup':
             p.add_argument('--partition', action='append', required=True, help=f'分区名，可重复；{backup.FULL_DISK} 表示全盘')
             p.add_argument('--no-reread', action='store_true')
+            p.add_argument('--vote', action='store_true', help='回读不一致时再读一遍，按扇区多数表决另存未验证镜像')
     v = sub.add_parser('verify', help='离线复核备份目录')
     v.add_argument('folder')
     d = sub.add_parser('dryrun', help='刷写演练（不写入）')
@@ -128,7 +129,7 @@ def main(argv):
         job = {'action': args.command, 'loader': os.path.abspath(args.loader), 'allow_unknown_loader': args.allow_unknown_loader,
                'mode': mode, 'port': port, 'reset_after': args.reset_after}
         if args.command == 'backup':
-            job.update(partitions=args.partition, reread=not args.no_reread, backup_base=str(paths.backups_dir()))
+            job.update(partitions=args.partition, reread=not args.no_reread, vote=args.vote, backup_base=str(paths.backups_dir()))
         return _run_job(job, PROBE_TIMEOUT if args.command == 'probe' else None)
     if args.command == 'verify':
         manifest, errors = backup.verify_backup(args.folder)

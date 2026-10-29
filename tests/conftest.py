@@ -23,6 +23,8 @@ class FakeDisk:
         self.reads = []
         self.flip_after = None  # 第 N 次读取后翻转一个字节，模拟传输错误
         self.short = False
+        self.flaky = {}  # 扇区 -> 在该扇区第几次被读到时翻转一个比特（模拟 eMMC 读不稳）
+        self.sector_reads = {}
 
     def read(self, start, count):
         self.reads.append((start, count))
@@ -31,6 +33,11 @@ class FakeDisk:
         chunk = bytearray(self.data[start * 512:(start + count) * 512])
         if self.flip_after is not None and len(self.reads) > self.flip_after:
             chunk[0] ^= 0xFF
+        for sector, bad_reads in self.flaky.items():
+            if start <= sector < start + count:
+                n = self.sector_reads[sector] = self.sector_reads.get(sector, 0) + 1
+                if n in bad_reads:
+                    chunk[(sector - start) * 512 + 7] ^= 1 << (n % 8)
         if self.short:
             chunk = chunk[:-1]
         return bytes(chunk)

@@ -135,6 +135,8 @@ class EdlLink:
         info = {'hwid': getattr(sahara, 'hwidstr', None), 'msm_id': None if msm_id is None else f'0x{msm_id:06x}',
                 'serial': None if getattr(sahara, 'serial', None) is None else str(sahara.serial),
                 'chip_ok': msm_id == MSM8916_ID if msm_id is not None else None}
+        if msm_id is None:
+            info['note'] = '设备已处于 Firehose 模式（之前连接过），本次没有经过 Sahara，读不到芯片信息，芯片型号未核对'
         if msm_id is not None and msm_id != MSM8916_ID:
             raise LinkError(f'芯片 MSM_ID {info["msm_id"]} 不是 MSM8916，停止')
         return info

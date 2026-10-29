@@ -78,6 +78,8 @@ class App:
         ttk.Checkbutton(bar, text='同时全盘备份', variable=self.full_disk).pack(side='left', padx=4)
         self.reread = tk.BooleanVar(value=True)
         ttk.Checkbutton(bar, text='二次回读校验（推荐）', variable=self.reread).pack(side='left', padx=4)
+        self.vote = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text='不一致时多数表决', variable=self.vote).pack(side='left', padx=4)
         self.backup_button = ttk.Button(bar, text='备份所选分区', command=self.start_backup, state='disabled', style='Accent.TButton')
         self.backup_button.pack(side='left', padx=4)
         ttk.Button(bar, text='复核备份…', command=self.verify_existing).pack(side='left', padx=4)
@@ -200,7 +202,7 @@ class App:
         job = self.base_job('backup')
         if not job:
             return
-        job.update(partitions=names, reread=self.reread.get(), backup_base=str(paths.backups_dir()))
+        job.update(partitions=names, reread=self.reread.get(), vote=self.vote.get(), backup_base=str(paths.backups_dir()))
         self.launch(job, timeout=None)
 
     def launch(self, job, timeout):
@@ -251,6 +253,8 @@ class App:
             self.device = event['device']
             chip = {True: 'MSM8916 ✓', False: '非 MSM8916', None: '未读到（设备可能已在 Firehose 模式）'}[self.device.get('chip_ok')]
             self.append_log(f'芯片：{chip}  HWID {self.device.get("hwid")}')
+            if self.device.get('note'):
+                self.append_log('提示：' + self.device['note'])
         elif kind == 'result' and event['action'] == 'probe':
             self.show_layout(event['layout'], event['warnings'])
             self.banner.say('happy', '分区表已读取：主备 GPT 一致')

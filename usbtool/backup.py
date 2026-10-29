@@ -5,10 +5,12 @@ import hashlib
 import json
 import os
 import pathlib
+import shutil
 
 from . import gpt
 
 CHUNK_SECTORS = 32768  # 16 MiB 一次
+MAX_TRACKED = 200000  # 最多保存这么多个不一致扇区的数据（约 100 MiB）
 FULL_DISK = '__full_disk__'
 MANIFEST = 'manifest.json'
 
@@ -87,7 +89,82 @@ def write_manifest(folder, manifest):
     os.replace(tmp, folder / MANIFEST)
 
 
-def run_backup(reader, folder, names, reread=True, progress=None, device=None, on_disk_sectors=None, log=print):
+def differing_sectors(a, b):
+    return [i for i in range(0, len(a), gpt.SECTOR) if a[i:i + gpt.SECTOR] != b[i:i + gpt.SECTOR]]
+
+
+def compare_reread(reader, start, count, partial, progress=None, label=''):
+    """第二遍读取并与第一遍的本地文件逐扇区比较。返回 (第二遍摘要, {绝对扇区: 第二遍数据}, 不同扇区总数)。
+    只保存前 MAX_TRACKED 个不同扇区的数据，超出部分只计数。"""
+    h = hashlib.sha256()
+    differing, total, done = {}, 0, 0
+    with open(partial, 'rb') as first:
+        while done < count:
+            n = min(CHUNK_SECTORS, count - done)
+            data = checked_read(reader, start + done, n)
+            h.update(data)
+            old = first.read(len(data))
+            if old != data:
+                for offset in differing_sectors(old, data):
+                    total += 1
+                    if len(differing) < MAX_TRACKED:
+                        differing[start + done + offset // gpt.SECTOR] = data[offset:offset + gpt.SECTOR]
+            done += n
+            if progress:
+                progress(label, done, count)
+    return h.hexdigest(), differing, total
+
+
+def write_mismatch_list(folder, filename, differing, total):
+    path = folder / (filename + '.mismatch.txt')
+    with open(path, 'w', encoding='utf-8') as stream:
+        stream.write(f'# 两次读取不同的绝对扇区（共 {total} 个，列出前 {len(differing)} 个）\n')
+        for sector in sorted(differing):
+            stream.write(f'{sector}\n')
+    return path.name
+
+
+def runs(sectors):
+    """把扇区号排序后合并成连续区段 [(起点, 个数)]。"""
+    result = []
+    for s in sorted(sectors):
+        if result and s == result[-1][0] + result[-1][1] and result[-1][1] < CHUNK_SECTORS:
+            result[-1][1] += 1
+        else:
+            result.append([s, 1])
+    return [tuple(r) for r in result]
+
+
+def best_effort_image(reader, folder, partial, filename, start, differing):
+    """对两次读取不同的扇区再读第三次，按扇区多数表决，另存 <名>.besteffort.img。
+    三次都不同的扇区保留第一次的数据并记为“无多数”。结果始终标记为未验证。"""
+    target = folder / (filename + '.besteffort.img')
+    shutil.copyfile(partial, target)
+    voted_second = undecided = 0
+    with open(partial, 'rb') as first, open(target, 'r+b') as out:
+        for run_start, run_count in runs(differing):
+            third = checked_read(reader, run_start, run_count)
+            for i in range(run_count):
+                sector = run_start + i
+                first.seek((sector - start) * gpt.SECTOR)
+                one = first.read(gpt.SECTOR)
+                two = differing[sector]
+                three = third[i * gpt.SECTOR:(i + 1) * gpt.SECTOR]
+                if three == two:
+                    out.seek((sector - start) * gpt.SECTOR)
+                    out.write(two)
+                    voted_second += 1
+                elif three != one:
+                    undecided += 1
+        out.flush()
+        os.fsync(out.fileno())
+    return {'file': target.name, 'verified': False, 'sha256': file_sha256(target), 'sectors_voted': len(differing),
+            'took_second_read': voted_second, 'no_majority': undecided,
+            'note': '多数表决合成，未经验证；不能作为写前备份，演练会拒绝'}
+
+
+def run_backup(reader, folder, names, reread=True, progress=None, device=None, on_disk_sectors=None, log=print,
+               vote=False):
     """备份到全新目录 folder。names 为分区名列表，可含 FULL_DISK。失败时保留 .partial 文件和清单供检查。"""
     folder = pathlib.Path(folder)
     if any(folder.iterdir()):
@@ -128,12 +205,19 @@ def run_backup(reader, folder, names, reread=True, progress=None, device=None, o
             raise BackupError(f'{name} 本地文件回读摘要不一致')
         if reread:
             log(f'二次读取 {name} 校验')
-            second = hash_range(reader, start, count, None, progress, f'{name} 回读校验')
+            second, differing, total = compare_reread(reader, start, count, partial, progress, f'{name} 回读校验')
             item['reread_sha256'] = second
-            if second != first:
+            if second != first or total:
                 item['status'] = 'failed_reread'
+                item['mismatch_sectors'] = total
+                item['mismatch_list'] = write_mismatch_list(folder, filename, differing, total)
+                if vote and differing and total <= MAX_TRACKED:
+                    log(f'{name}：{total} 个扇区两次读取不同，第三次读取这些扇区做多数表决')
+                    item['best_effort'] = best_effort_image(reader, folder, partial, filename, start, differing)
                 write_manifest(folder, manifest)
-                raise BackupError(f'{name} 两次从设备读取的内容不一致')
+                hint = '，已另存多数表决的尽力而为镜像（未验证）' if item.get('best_effort') else ''
+                raise BackupError(f'{name} 两次从设备读取的内容不一致：{total} 个扇区不同{hint}。'
+                                  '可能是存储芯片读不稳，此备份不能作为可信的写前备份')
         if name == FULL_DISK:
             with open(partial, 'rb') as stream:
                 if stream.read(len(primary)) != primary:

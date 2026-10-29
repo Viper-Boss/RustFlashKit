@@ -127,7 +127,7 @@ def run(job, link_factory=None):
         else:
             folder = backup.new_backup_dir(job.get('backup_base') or paths.backups_dir())
             emit('log', message=f'备份目录：{folder}')
-            manifest = backup.run_backup(link.read, folder, job['partitions'], reread=job.get('reread', True),
+            manifest = backup.run_backup(link.read, folder, job['partitions'], reread=job.get('reread', True), vote=job.get('vote', False),
                                          progress=progress, device=device, on_disk_sectors=link.set_disk_sectors,
                                          log=lambda m: emit('log', message=m))
             emit('result', action='backup', folder=str(folder), manifest=manifest)
