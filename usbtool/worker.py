@@ -14,7 +14,7 @@ import traceback
 from . import backup, paths, policy
 
 PREFIX = '@@USBTOOL '
-ACTIONS = ('probe', 'backup')
+ACTIONS = ('probe', 'backup', 'write')
 # 看门狗时限（秒）：连接阶段为整体上限；读取阶段为“多久没有任何进展”的上限。
 CONNECT_LIMIT = 90
 STALL_LIMIT = 120
@@ -99,6 +99,13 @@ def validate_job(job):
         names = job.get('partitions')
         if not isinstance(names, list) or not names or not all(isinstance(n, str) for n in names):
             raise ValueError('备份任务需要分区列表')
+    if job['action'] == 'write':
+        if job['mode'] != 'usb':
+            raise ValueError('写入只支持 USB（WinUSB）方式')
+        if job.get('reset_after'):
+            raise ValueError('写入任务不允许自动重启设备')
+        if not all(isinstance(job.get(k), str) and job.get(k) for k in ('plan', 'step', 'confirm')):
+            raise ValueError('写入任务需要计划文件、步骤名和确认摘要')
 
 
 def run(job, link_factory=None):
@@ -124,10 +131,18 @@ def run(job, link_factory=None):
         if job['action'] == 'probe':
             layout, _p, _b = backup.read_layout(link.read, link.set_disk_sectors)
             emit('result', action='probe', device=device, layout=layout, warnings=policy.ufi003_warnings(layout))
+        elif job['action'] == 'write':
+            from . import __version__, write_runner, writeplan
+            plan = writeplan.load_plan(job['plan'])
+            ep_out, ep_in = link.endpoints()
+            report, folder = write_runner.run_step(plan, job['step'], job['confirm'], link.read, ep_out, ep_in,
+                                                   log=lambda m: emit('log', message=m), progress=progress,
+                                                   on_disk_sectors=link.set_disk_sectors, tool_version=__version__)
+            emit('result', action='write', folder=str(folder), status=report['status'], passed=report['passed'])
         else:
             folder = backup.new_backup_dir(job.get('backup_base') or paths.backups_dir())
             emit('log', message=f'备份目录：{folder}')
-            manifest = backup.run_backup(link.read, folder, job['partitions'], reread=job.get('reread', True), vote=job.get('vote', False),
+            manifest = backup.run_backup(link.read, folder, job['partitions'], reread=job.get('reread', True), vote=job.get('vote', False), keep_reads=job.get('keep_reads', False),
                                          progress=progress, device=device, on_disk_sectors=link.set_disk_sectors,
                                          log=lambda m: emit('log', message=m))
             emit('result', action='backup', folder=str(folder), manifest=manifest)

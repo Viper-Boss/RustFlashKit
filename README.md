@@ -10,7 +10,7 @@
 | 上传 Firehose 加载器、读主/备 GPT 并校验 CRC 和一致性 | 已实现；2026-10-29 实机通过（USB/WinUSB 方式） |
 | 按分区或全盘备份到本地，长度 + SHA256 + 二次回读校验，离线复核；回读不一致时定位扇区，可选第三遍多数表决另存“尽力而为”镜像（标为未验证，演练不会采用） | 已实现；实机上正确识别出一块读不稳的二手 eMMC 并拒绝备份；在稳定设备上完整通过尚未实测 |
 | 刷写演练：只核对，不连接设备、不写入 | 已实现，测试通过 |
-| 真实刷写 | **未实现**（以后实现时每次写入都需要用户明确批准） |
+| 受限写入（按计划文件一次一步，只限命令行、只限 USB 方式） | 已实现，模拟设备测试通过；**从未对真实设备写入过**，每次真实写入都需要用户单独批准 |
 | 经 USB 重连 Wi-Fi：工具自有密钥配对/登录、读取网络列表、试连接/确认/取消（45 秒自动回滚） | 工具端已实现，模拟测试通过；**需要设备端先改 3 处**（`docs/DEVICE-SIDE-WIFI-AUTH.md`），未经实机验证 |
 | 导出短信和通话记录 | **未实现**，见 `docs/PLAN.md` |
 
@@ -46,6 +46,23 @@ RustSimHub-UsbTool-cli.exe dryrun --backup-dir .local\backups\20261029-120000 --
 3. 首次授权：在设备网页上（主人登录）打开配对窗口 → 回到工具点“申请授权” → 在网页上核对申请编号和工具公钥后批准。工具只申请 `status.read` 和 `network.manage` 两项权限。
 4. 以后每次只需“登录” → 读取网络列表或手动输入 → “试连接” → 状态变成“已连上”后点“确认保存”。45 秒内不确认，设备会自动恢复原网络。结果不明时只能“重新查询”（用同一个编号），不会自动重做。
 5. 工具私钥用 Windows DPAPI 加密保存在 `.local/edge/client.key`，只有当前 Windows 账号能解开；在设备网页上撤销授权即可让它失效。
+
+## 受限写入（命令行）
+
+用于把读不稳的二手 UFI003 改造成测试机（RustSimHub PR #73）。界面里没有写入功能，只能用命令行，且只支持 USB（WinUSB）方式。
+
+1. 计划文件（JSON，`kind: usbtool-write-plan`）列出每一步：目标（只能是 `tz`、`aboot`、`boot`、`NSHSTATE`、`rootfs`、`gpt`）、写入段（起始扇区、扇区数、载荷文件、SHA256）、写入前设备 GPT 的摘要；GPT 步骤还要给出写入后的新摘要。另有保护区段列表，必须覆盖 modem、fsg、modemst1、modemst2、fsc、sec、persist 中设备上存在的每一个。
+2. 先离线核对（不打开 USB）：`RustSimHub-UsbTool-cli.exe write-dryrun --plan plan.json --backup-dir <含当前 GPT 的备份目录>`。它按顺序核对每一步（GPT 步骤之后改用新表），并给出每一步的**步骤摘要**。
+3. 用户在聊天里核对并批准某一步的步骤摘要后，才执行这一步：`RustSimHub-UsbTool-cli.exe write --loader <加载器> --mode usb --plan plan.json --step tz --confirm <步骤摘要>`。
+
+硬性规则（代码写死，计划文件改不了）：
+- sbl1、rpm、hyp、各备份分区（tzbak、abootbak 等）以及全部基带/NV/校准分区永远不能作为目标；重写 GPT 时，这些分区的 128 字节表项必须原样保留。
+- tz、aboot、GPT 这类启动链写入，只允许在**不是原设备布局**的设备上进行。
+- 设备当前的 GPT 摘要必须等于该步骤绑定的值。写入段必须从目标分区起点开始、不超过分区，且不与任何保护区段重叠。
+- 写入时先发送 `configure SkipWrite=0`。`program` 必须先收到 `rawmode="true"` 的明确 ACK 才发数据；每块不超过 16384 字节，按实际写出字节核对，并补零长度包；数据发完必须收到 `rawmode="false"` 的明确 ACK。短写、超时、NAK 一律终止，不重发。
+- 写前：保护区读两遍，记下哪些扇区读得稳；目标区的原内容另存为前像。写后：目标区回读三遍，每遍都要等于载荷；保护区再读一遍，逐扇区比较；重新读 GPT 核对摘要。
+- 结果写在 `.local\writes\<时间>\report.json`，状态为下列之一：`verified`、`written_unprovable`（有保护扇区本来就读不稳，无法证明它们未变）、`readback_mismatch`、`protected_changed`、`gpt_mismatch`、`write_failed`。
+- 每一步执行前都会在 `.local\write-attempts\` 写一个标记，同一步不能被自动再次执行。不会自动重启设备。
 
 ## 安全设计
 

@@ -93,16 +93,17 @@ def differing_sectors(a, b):
     return [i for i in range(0, len(a), gpt.SECTOR) if a[i:i + gpt.SECTOR] != b[i:i + gpt.SECTOR]]
 
 
-def compare_reread(reader, start, count, partial, progress=None, label=''):
+def compare_reread(reader, start, count, partial, progress=None, label='', keep=None):
     """第二遍读取并与第一遍的本地文件逐扇区比较。返回 (第二遍摘要, {绝对扇区: 第二遍数据}, 不同扇区总数)。
     只保存前 MAX_TRACKED 个不同扇区的数据，超出部分只计数。"""
     h = hashlib.sha256()
     differing, total, done = {}, 0, 0
-    with open(partial, 'rb') as first:
+    with open(partial, 'rb') as first, (open(keep, 'xb') if keep else open(os.devnull, 'wb')) as second:
         while done < count:
             n = min(CHUNK_SECTORS, count - done)
             data = checked_read(reader, start + done, n)
             h.update(data)
+            second.write(data)
             old = first.read(len(data))
             if old != data:
                 for offset in differing_sectors(old, data):
@@ -164,7 +165,7 @@ def best_effort_image(reader, folder, partial, filename, start, differing):
 
 
 def run_backup(reader, folder, names, reread=True, progress=None, device=None, on_disk_sectors=None, log=print,
-               vote=False):
+               vote=False, keep_reads=False):
     """备份到全新目录 folder。names 为分区名列表，可含 FULL_DISK。失败时保留 .partial 文件和清单供检查。"""
     folder = pathlib.Path(folder)
     if any(folder.iterdir()):
@@ -205,7 +206,10 @@ def run_backup(reader, folder, names, reread=True, progress=None, device=None, o
             raise BackupError(f'{name} 本地文件回读摘要不一致')
         if reread:
             log(f'二次读取 {name} 校验')
-            second, differing, total = compare_reread(reader, start, count, partial, progress, f'{name} 回读校验')
+            keep = folder / (filename + '.read2') if keep_reads else None
+            second, differing, total = compare_reread(reader, start, count, partial, progress, f'{name} 回读校验', keep)
+            if keep:
+                item['read2_file'] = keep.name
             item['reread_sha256'] = second
             if second != first or total:
                 item['status'] = 'failed_reread'

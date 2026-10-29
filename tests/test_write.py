@@ -1,0 +1,323 @@
+# SPDX-License-Identifier: GPL-3.0-only
+import hashlib
+import json
+import xml.etree.ElementTree as ET
+
+import pytest
+
+from conftest import FakeDisk
+from usbtool import backup, cli, firehose_write, gpt, policy, write_runner, writeplan, worker
+
+SECTORS = 8192
+STICK = [('sbl1', 34, 99), ('modem', 100, 1099), ('fsg', 1100, 1199), ('modemst1', 1200, 1299),
+         ('modemst2', 1300, 1399), ('fsc', 1400, 1409), ('tz', 1410, 1509), ('aboot', 1510, 1609),
+         ('boot', 1610, 1865), ('persist', 1866, 1965), ('rootfs', 1966, 6999), ('NSHSTATE', 7000, 8100)]
+PROTECTED = [{'name': n, 'first_sector': a, 'sectors': b - a + 1} for n, a, b in STICK
+             if n in ('modem', 'fsg', 'modemst1', 'modemst2', 'fsc', 'persist')]
+
+
+class Timeout(Exception):
+    def __str__(self):
+        return 'Operation timed out'
+
+
+class FakeTarget:
+    """模拟 Firehose 加载器：configure / program / 原始数据 / ACK，并把数据真正写进 FakeDisk。"""
+
+    def __init__(self, disk):
+        self.disk = disk
+        self.queue = []
+        self.raw = None
+        self.writes_enabled = False
+        self.fault = None
+        self.out = self.Out(self)
+        self.inp = self.In(self)
+
+    def reply(self, value='ACK', rawmode=None, log=None):
+        body = f'<log value="{log}" />' if log else ''
+        attr = f' rawmode="{rawmode}"' if rawmode else ''
+        self.queue.append(f'<?xml version="1.0" ?><data>{body}<response value="{value}"{attr} /></data>'.encode())
+
+    class Out:
+        def __init__(self, t):
+            self.t = t
+
+        def write(self, data, timeout=None):
+            t = self.t
+            if t.raw is None:
+                if not data:
+                    return 0
+                cmd = ET.fromstring(data)[0]
+                if cmd.tag == 'configure':
+                    t.writes_enabled = cmd.get('SkipWrite') == '0'
+                    t.reply('ACK')
+                elif cmd.tag == 'program':
+                    if t.fault == 'nak_program' or not t.writes_enabled:
+                        t.reply('NAK', log='ACK would be nice')  # 日志里的 ACK 不能被当成 ACK
+                        return len(data)
+                    if t.fault == 'silent':
+                        return len(data)
+                    t.raw = [int(cmd.get('start_sector')), int(cmd.get('num_partition_sectors')), bytearray()]
+                    t.reply('ACK', 'false' if t.fault == 'no_rawmode' else 'true')
+                return len(data)
+            if not data:
+                return 0
+            if t.fault == 'short_write':
+                return len(data) - 512
+            t.raw[2].extend(data)
+            start, count, buf = t.raw
+            if len(buf) == count * 512:
+                if t.fault == 'corrupt':
+                    buf[100] ^= 1
+                t.disk.data[start * 512:(start + count) * 512] = buf
+                if t.fault == 'collateral':
+                    t.disk.data[150 * 512] ^= 0xFF  # 意外改动 modem 区域
+                t.raw = None
+                t.reply('NAK' if t.fault == 'final_nak' else 'ACK', 'false')
+            return len(data)
+
+    class In:
+        def __init__(self, t):
+            self.t = t
+
+        def read(self, size, timeout=None):
+            if not self.t.queue:
+                raise Timeout()
+            return self.t.queue.pop(0)
+
+
+@pytest.fixture
+def stick():
+    return FakeDisk(SECTORS, STICK, seed=3)
+
+
+def current_gpt(disk):
+    primary = disk.range(0, 33)
+    back = disk.range(SECTORS - 33, SECTORS - 1)
+    return gpt.parse_gpt(primary, back, SECTORS), primary
+
+
+def make_plan(tmp_path, disk, steps):
+    layout, _ = current_gpt(disk)
+    plan = {'format': 1, 'kind': 'usbtool-write-plan', 'protected': PROTECTED, 'steps': []}
+    for name, target, first, payload in steps:
+        path = tmp_path / f'{name}.bin'
+        path.write_bytes(payload)
+        plan['steps'].append({'name': name, 'target': target, 'expected_gpt_sha256': layout['gpt_sha256'],
+                              'segments': [{'first_sector': first, 'sectors': len(payload) // 512, 'payload': path.name,
+                                            'sha256': hashlib.sha256(payload).hexdigest()}]})
+    path = tmp_path / 'plan.json'
+    path.write_text(json.dumps(plan), encoding='utf-8')
+    return path
+
+
+def tz_payload():
+    return bytes(range(256)) * 2 * 100  # 100 扇区
+
+
+def run(plan_path, disk, step='tz', fault=None, confirm=None):
+    plan = writeplan.load_plan(plan_path)
+    target = FakeTarget(disk)
+    target.fault = fault
+    digest = writeplan.step_digest(plan, writeplan.find_step(plan, step))
+    return write_runner.run_step(plan, step, confirm or digest, disk.read, target.out, target.inp, log=lambda m: None)
+
+
+def test_tz_step_written_and_verified(stick, tmp_path):
+    plan = make_plan(tmp_path, stick, [('tz', 'tz', 1410, tz_payload())])
+    before_modem = stick.range(100, 1099)
+    report, folder = run(plan, stick)
+    assert report['status'] == 'verified' and report['passed'] and not report['reset_sent']
+    assert stick.range(1410, 1509) == tz_payload() and stick.range(100, 1099) == before_modem
+    assert all(r['changed_sectors'] == 0 for r in report['protected_after'])
+    assert (folder / report['preimage'][0]['file']).stat().st_size == 100 * 512
+    with pytest.raises(write_runner.WriteRefused, match='已经尝试过'):
+        run(plan, stick)  # 同一步不能自动再执行
+
+
+def test_wrong_confirm_refused_before_touching_device(stick, tmp_path):
+    plan = make_plan(tmp_path, stick, [('tz', 'tz', 1410, tz_payload())])
+    reads = len(stick.reads)
+    with pytest.raises(write_runner.WriteRefused, match='步骤摘要'):
+        run(plan, stick, confirm='0' * 16)
+    assert len(stick.reads) == reads
+
+
+def test_gpt_binding_mismatch_refused(stick, tmp_path):
+    plan_path = make_plan(tmp_path, stick, [('tz', 'tz', 1410, tz_payload())])
+    data = json.loads(plan_path.read_text(encoding='utf-8'))
+    data['steps'][0]['expected_gpt_sha256'] = 'ab' * 32
+    plan_path.write_text(json.dumps(data), encoding='utf-8')
+    before = bytes(stick.data)
+    with pytest.raises(writeplan.PlanError, match='GPT 摘要'):
+        run(plan_path, stick)
+    assert bytes(stick.data) == before
+
+
+def test_original_device_layout_refuses_boot_chain(stick, tmp_path, monkeypatch):
+    layout, _ = current_gpt(stick)
+    by = {p['name']: p for p in layout['partitions']}
+    monkeypatch.setattr(policy, 'UFI003_LAYOUT', {by[n]['index']: (n, by[n]['bytes']) for n in ('boot', 'rootfs', 'NSHSTATE')})
+    plan = make_plan(tmp_path, stick, [('tz', 'tz', 1410, tz_payload())])
+    with pytest.raises(writeplan.PlanError, match='原设备'):
+        run(plan, stick)
+
+
+@pytest.mark.parametrize('change,match', [
+    (lambda p: p['steps'][0].update(target='sbl1'), '允许名单'),
+    (lambda p: p['steps'][0].update(target='modem'), '允许名单'),
+    (lambda p: p.update(protected=[r for r in p['protected'] if r['name'] != 'modemst2']), 'modemst2'),
+    (lambda p: p['steps'][0]['segments'][0].update(first_sector=1411), '分区起点'),
+    (lambda p: p['steps'][0]['segments'][0].update(sha256='00' * 32), 'SHA256'),
+    (lambda p: p.update(extra=1), '未知字段'),
+    (lambda p: p['steps'][0].update(expected_gpt_after_sha256='ab' * 32), '只有 GPT'),
+])
+def test_plan_rules(stick, tmp_path, change, match):
+    plan_path = make_plan(tmp_path, stick, [('tz', 'tz', 1410, tz_payload())])
+    data = json.loads(plan_path.read_text(encoding='utf-8'))
+    change(data)
+    plan_path.write_text(json.dumps(data), encoding='utf-8')
+    with pytest.raises(writeplan.PlanError, match=match):
+        plan = writeplan.load_plan(plan_path)
+        layout, primary = current_gpt(stick)
+        writeplan.validate_step(plan, plan['steps'][0], layout, primary)
+
+
+def test_oversized_segment_refused(stick, tmp_path):
+    plan = make_plan(tmp_path, stick, [('tz', 'tz', 1410, bytes(512 * 101))])
+    with pytest.raises(writeplan.PlanError, match='不超过分区'):
+        run(plan, stick)
+
+
+@pytest.mark.parametrize('fault', ['nak_program', 'no_rawmode', 'short_write', 'final_nak'])
+def test_transport_failures_stop_without_retry(stick, tmp_path, fault):
+    plan = make_plan(tmp_path, stick, [('tz', 'tz', 1410, tz_payload())])
+    with pytest.raises(firehose_write.WriteFailed):
+        run(plan, stick, fault=fault)
+    reports = list((write_runner.paths.local_dir() / 'writes').glob('*/report.json'))
+    report = json.loads(reports[0].read_text(encoding='utf-8'))
+    assert report['status'] == 'write_failed' and report['transcript'] and not report['passed']
+    with pytest.raises(write_runner.WriteRefused, match='已经尝试过'):
+        run(plan, stick)
+
+
+def test_silent_target_times_out():
+    target = FakeTarget(FakeDisk(SECTORS, STICK))
+    target.fault = 'silent'
+    session = firehose_write.WriteSession(target.out, target.inp, [{'first_sector': 1410, 'sectors': 1, 'sha256': '0' * 64}],
+                                          reply_timeout=0.3)
+    session.configure()
+    with pytest.raises(firehose_write.WriteFailed, match='明确响应'):
+        session.program_next(open(__file__, 'rb'))
+
+
+def test_readback_mismatch_reported(stick, tmp_path):
+    plan = make_plan(tmp_path, stick, [('tz', 'tz', 1410, tz_payload())])
+    report, _ = run(plan, stick, fault='corrupt')
+    assert report['status'] == 'readback_mismatch' and not report['passed']
+
+
+def test_collateral_change_detected(stick, tmp_path):
+    plan = make_plan(tmp_path, stick, [('tz', 'tz', 1410, tz_payload())])
+    report, _ = run(plan, stick, fault='collateral')
+    assert report['status'] == 'protected_changed'
+    assert next(r for r in report['protected_after'] if r['name'] == 'modem')['changed_sectors'] == 1
+
+
+def test_unstable_protected_is_unprovable_not_pass(stick, tmp_path):
+    stick.flaky = {500: {2, 3}}  # modem 内一个扇区：写前第 2 次和写后读数都翻转 -> 不稳定且写后与写前第 1 次不同
+    plan = make_plan(tmp_path, stick, [('tz', 'tz', 1410, tz_payload())])
+    report, _ = run(plan, stick)
+    modem = next(r for r in report['protected_after'] if r['name'] == 'modem')
+    assert modem['unstable_sectors'] == 1
+    assert modem['unprovable_sectors'] == 1 and report['status'] == 'written_unprovable' and not report['passed']
+
+
+def test_compare_protected_classification():
+    a, b = [b'1', b'2', b'3', b'4'], [b'1', b'X', b'3', b'Y']
+    after = [b'1', b'2', b'Z', b'Q']
+    assert write_runner.compare_protected(a, b, after) == {'changed_sectors': 1, 'unstable_sectors': 2, 'unprovable_sectors': 1}
+
+
+def build_new_gpt(disk, move_modem=False):
+    # 原地替换表项（保持序号，夹具的 GUID 随序号生成），保留分区的 128 字节表项因此不变
+    new = {'boot': ('boot', 1966, 2477), 'NSHSTATE': ('NSHSTATE', 2478, 2999), 'rootfs': ('rootfs', 3000, 8100)}
+    if move_modem:
+        new['modem'] = ('modem', 101, 1099)
+    return gpt.build_gpt(SECTORS, [new.get(p[0], p) for p in STICK])
+
+
+def gpt_plan(tmp_path, disk, move_modem=False):
+    layout, _ = current_gpt(disk)
+    primary, back = build_new_gpt(disk, move_modem)
+    (tmp_path / 'gpt-p.bin').write_bytes(primary)
+    (tmp_path / 'gpt-b.bin').write_bytes(back)
+    plan = {'format': 1, 'kind': 'usbtool-write-plan', 'protected': PROTECTED, 'steps': [{
+        'name': 'gpt', 'target': 'gpt', 'expected_gpt_sha256': layout['gpt_sha256'],
+        'expected_gpt_after_sha256': gpt.gpt_digest(primary, back),
+        'segments': [{'first_sector': 0, 'sectors': 34, 'payload': 'gpt-p.bin', 'sha256': hashlib.sha256(primary).hexdigest()},
+                     {'first_sector': SECTORS - 33, 'sectors': 33, 'payload': 'gpt-b.bin',
+                      'sha256': hashlib.sha256(back).hexdigest()}]}]}
+    path = tmp_path / 'plan.json'
+    path.write_text(json.dumps(plan), encoding='utf-8')
+    return path
+
+
+def test_gpt_step_end_to_end(stick, tmp_path):
+    report, _ = run(gpt_plan(tmp_path, stick), stick, step='gpt')
+    assert report['status'] == 'verified'
+    layout, _ = current_gpt(stick)
+    assert {p['name'] for p in layout['partitions']} >= {'modem', 'fsg', 'boot', 'rootfs', 'NSHSTATE'}
+    assert report['gpt_after_sha256'] == layout['gpt_sha256'] != report['gpt_before_sha256']
+
+
+def test_gpt_rewrite_moving_nv_partition_refused(stick, tmp_path):
+    plan = writeplan.load_plan(gpt_plan(tmp_path, stick, move_modem=True))
+    layout, primary = current_gpt(stick)
+    with pytest.raises(writeplan.PlanError, match='modem'):
+        writeplan.validate_step(plan, plan['steps'][0], layout, primary)
+
+
+def test_decode_reply_rules():
+    reply, logs = firehose_write.decode_reply(b'<?xml version="1.0" ?><data><log value="ACK" /></data>')
+    assert reply is None and logs == ['ACK']
+    with pytest.raises(ValueError):
+        firehose_write.decode_reply(b'<data><response value="ACK" /></data><data><response value="ACK" /></data>')
+    with pytest.raises(ValueError):
+        firehose_write.decode_reply(b'<!DOCTYPE x><data><response value="ACK" /></data>')
+    with pytest.raises(ValueError):
+        firehose_write.decode_reply(b'<data><response value="MAYBE" /></data>')
+
+
+def test_cli_write_dryrun_chains_gpt_change(stick, tmp_path, capsys):
+    folder = backup.new_backup_dir(tmp_path / 'b')
+    backup.run_backup(stick.read, folder, ['tz'], reread=False, log=lambda m: None)
+    plan_path = gpt_plan(tmp_path, stick)
+    data = json.loads(plan_path.read_text(encoding='utf-8'))
+    payload = tz_payload()
+    (tmp_path / 'tz.bin').write_bytes(payload)
+    data['steps'].append({'name': 'tz', 'target': 'tz', 'expected_gpt_sha256': data['steps'][0]['expected_gpt_after_sha256'],
+                          'segments': [{'first_sector': 1410, 'sectors': 100, 'payload': 'tz.bin',
+                                        'sha256': hashlib.sha256(payload).hexdigest()}]})
+    plan_path.write_text(json.dumps(data), encoding='utf-8')
+    reads = len(stick.reads)
+    assert cli.main(['write-dryrun', '--plan', str(plan_path), '--backup-dir', str(folder)]) == 0
+    out = capsys.readouterr().out
+    assert out.count('[通过]') == 2 and '步骤摘要' in out and len(stick.reads) == reads
+
+
+@pytest.mark.parametrize('job', [
+    {'action': 'write', 'mode': 'serial', 'plan': 'p', 'step': 's', 'confirm': 'c'},
+    {'action': 'write', 'mode': 'usb', 'plan': 'p', 'step': 's', 'confirm': 'c', 'reset_after': True},
+    {'action': 'write', 'mode': 'usb', 'plan': 'p', 'step': 's'},
+])
+def test_worker_write_job_rules(job):
+    with pytest.raises(ValueError):
+        worker.validate_job(job)
+
+
+def test_keep_reads_saves_second_pass(stick, tmp_path):
+    folder = backup.new_backup_dir(tmp_path / 'k')
+    manifest = backup.run_backup(stick.read, folder, ['tz'], keep_reads=True, log=lambda m: None)
+    item = manifest['items'][0]
+    assert (folder / item['read2_file']).read_bytes() == stick.range(1410, 1509)

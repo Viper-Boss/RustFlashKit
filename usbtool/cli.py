@@ -47,6 +47,9 @@ def _pump(proc, code):
                     print(f'{p["index"]:>3} {p["name"]:<12} 起始 {p["first_sector"]:>10} 大小 {p["bytes"]:>12}')
                 for w in event['warnings']:
                     print('提示：' + w)
+            elif event['action'] == 'write':
+                code = 0 if event['passed'] else 1
+                print(f'\n写入步骤结束：{event["status"]}（报告：{event["folder"]}；未自动重启设备）')
             else:
                 print(f'\n备份完成：{event["folder"]}')
         elif kind == 'error':
@@ -89,17 +92,27 @@ def main(argv):
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('detect', help='列出 9008 设备')
     sub.add_parser('selfcheck', help='运行环境自检（不访问设备）')
-    for name in ('probe', 'backup'):
-        p = sub.add_parser(name)
+    for name in ('probe', 'backup', 'write'):
+        p = sub.add_parser(name, help='按计划写入一步（只支持 USB 方式；需要 --confirm 步骤摘要）' if name == 'write' else None)
         p.add_argument('--loader', required=True)
         p.add_argument('--allow-unknown-loader', action='store_true')
         p.add_argument('--mode', choices=('serial', 'usb'))
         p.add_argument('--port', default='')
-        p.add_argument('--reset-after', action='store_true', help='完成后请求设备正常重启一次')
+        if name != 'write':
+            p.add_argument('--reset-after', action='store_true', help='完成后请求设备正常重启一次')
         if name == 'backup':
             p.add_argument('--partition', action='append', required=True, help=f'分区名，可重复；{backup.FULL_DISK} 表示全盘')
             p.add_argument('--no-reread', action='store_true')
             p.add_argument('--vote', action='store_true', help='回读不一致时再读一遍，按扇区多数表决另存未验证镜像')
+            p.add_argument('--keep-reads', action='store_true', help='另存第二遍原始读数（<文件>.read2）')
+        if name == 'write':
+            p.add_argument('--plan', required=True)
+            p.add_argument('--step', required=True, help='只执行这一步')
+            p.add_argument('--confirm', required=True, help='步骤摘要（write-dryrun 会给出；至少前 16 位）')
+    w = sub.add_parser('write-dryrun', help='离线核对写入计划（不打开 USB）')
+    w.add_argument('--plan', required=True)
+    w.add_argument('--backup-dir', required=True, help='含当前设备 gpt-primary.bin / gpt-backup.bin 的备份目录')
+    w.add_argument('--step', help='只核对这一步（默认按顺序核对全部）')
     v = sub.add_parser('verify', help='离线复核备份目录')
     v.add_argument('folder')
     d = sub.add_parser('dryrun', help='刷写演练（不写入）')
@@ -118,7 +131,24 @@ def main(argv):
         for n in notes:
             print('提示：' + n)
         return 0 if devices else 1
-    if args.command in ('probe', 'backup'):
+    if args.command == 'write-dryrun':
+        from . import write_runner, writeplan
+        try:
+            plan = writeplan.load_plan(args.plan)
+        except (writeplan.PlanError, OSError, ValueError) as err:
+            print(f'错误：{err}', file=sys.stderr)
+            return 1
+        print(f'计划摘要：{plan["_sha256"]}（不打开 USB，不写入）')
+        reports = write_runner.dry_run_plan(plan, args.backup_dir, args.step)
+        for r in reports:
+            if r['passed']:
+                print(f'[通过] {r["step"]} → {r["target"]}  步骤摘要 {r["step_digest"]}')
+                for s in r['segments']:
+                    print(f'        扇区 {s["first_sector"]} 起 {s["sectors"]} 个  {s["payload"]}  sha256 {s["sha256"][:16]}…')
+            else:
+                print(f'[拒绝] {r["step"]}：' + '；'.join(r['errors']))
+        return 0 if reports and all(r['passed'] for r in reports) else 1
+    if args.command in ('probe', 'backup', 'write'):
         mode, port = args.mode, args.port
         if mode is None:
             devices, _ = detect.detect()
@@ -127,9 +157,12 @@ def main(argv):
                 return 1
             mode, port = devices[0]['mode'], devices[0]['port']
         job = {'action': args.command, 'loader': os.path.abspath(args.loader), 'allow_unknown_loader': args.allow_unknown_loader,
-               'mode': mode, 'port': port, 'reset_after': args.reset_after}
+               'mode': mode, 'port': port, 'reset_after': getattr(args, 'reset_after', False)}
         if args.command == 'backup':
-            job.update(partitions=args.partition, reread=not args.no_reread, vote=args.vote, backup_base=str(paths.backups_dir()))
+            job.update(partitions=args.partition, reread=not args.no_reread, vote=args.vote, keep_reads=args.keep_reads,
+                       backup_base=str(paths.backups_dir()))
+        if args.command == 'write':
+            job.update(plan=os.path.abspath(args.plan), step=args.step, confirm=args.confirm)
         return _run_job(job, PROBE_TIMEOUT if args.command == 'probe' else None)
     if args.command == 'verify':
         manifest, errors = backup.verify_backup(args.folder)

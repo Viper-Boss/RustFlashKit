@@ -20,6 +20,8 @@
 
 GPT 主/备校验规则、Firehose XML 白名单、禁用 edl 写入方法的做法移植自同一作者的 RustSimHub 项目
 `tools/recovery/edl_readonly.py`（原为 AGPL-3.0-only，由版权人在本项目中以 GPL-3.0-only 重新发布）。
+严格写入传输规则（明确 ACK 解析、按实际写出字节核对、短写不重试、零长度包）移植自同一项目的
+`tools/recovery/restore_protocol.py`，许可证处理同上。
 
 ## 不包含的内容
 
