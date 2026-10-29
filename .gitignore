@@ -1,6 +1,12 @@
 .local/
 .private/
-/target/
+.venv/
+build/
+dist/
+*.spec
+.local-build.log
+__pycache__/
+.pytest_cache/
 *.img
 *.bin
 *.mbn

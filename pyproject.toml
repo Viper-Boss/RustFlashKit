@@ -1,0 +1,10 @@
+[project]
+name = "rustsimhub-usbtool"
+version = "0.1.0"
+description = "UFI003 (MSM8916) 9008 read-only backup and flash dry-run tool"
+license = "GPL-3.0-only"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = [".", "tests"]
+testpaths = ["tests"]
