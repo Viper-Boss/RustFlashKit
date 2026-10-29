@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from . import __version__, backup, detect, dryrun, paths, policy, worker
+from .gui_wifi import WifiTab
 from .edl_link import loader_digest
 
 PROBE_TIMEOUT = 300  # 秒；读分区表应在几十秒内完成
@@ -44,6 +45,7 @@ class App:
         tabs.pack(fill='both', expand=True, padx=8)
         self.build_backup_tab(tabs)
         self.build_dryrun_tab(tabs)
+        WifiTab(tabs, self)
         self.build_later_tab(tabs)
 
         bottom = ttk.Frame(root)
@@ -114,11 +116,9 @@ class App:
 
     def build_later_tab(self, tabs):
         frame = ttk.Frame(tabs)
-        tabs.add(frame, text='Wi-Fi / 短信通话导出')
+        tabs.add(frame, text='短信/通话导出')
         ttk.Label(frame, wraplength=840, justify='left', text=(
-            '尚未实现。\n\n计划：通过 USB 网络连接 RustSimHub 设备的 Edge HTTPS 接口，以经主人批准配对的客户端身份'
-            '调用已有接口重新连接 Wi-Fi（扫描选择或手动输入，带 45 秒自动回滚；不做 Wi-Fi 配置导入导出）；'
-            '短信和通话记录通过已授权的查询接口导出。\n'
+            '尚未实现。计划：用 Wi-Fi 重连页同一个已授权连接，经设备已有的查询接口导出短信和通话记录。'
             '不会绕过设备鉴权，也不会直接改写设备数据库。')).pack(anchor='w', padx=8, pady=8)
 
     # ---------- 动作 ----------

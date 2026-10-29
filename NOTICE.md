@@ -12,6 +12,7 @@
 | lxml | 6.0.2 | BSD-3-Clause | edl 依赖 | https://lxml.de |
 | pycryptodome / pycryptodomex | 3.23.0 | BSD-2-Clause / 公有领域部分 | edl 依赖 | https://www.pycryptodome.org |
 | colorama | 0.4.6 | BSD-3-Clause | edl 依赖 | https://github.com/tartley/colorama |
+| cryptography | 46.0.3 | Apache-2.0 或 BSD-3-Clause | Ed25519 配对/登录签名、证书解析 | https://cryptography.io |
 | Python 运行时（PyInstaller 打包） | 3.12 | PSF License | 解释器 | https://www.python.org |
 | PyInstaller 引导程序 | 6.22.3 | GPLv2+ 带打包例外 | 生成单文件 exe | https://pyinstaller.org |
 
