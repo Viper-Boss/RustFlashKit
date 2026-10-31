@@ -368,3 +368,22 @@ def test_old_fixed_16k_chunks_reproduce_real_gpt_nak(stick, tmp_path):
     assert bytes(stick.data) == before
     report, _ = run(gpt_plan(tmp_path, stick), stick, step='gpt')
     assert report['status'] == 'verified' and report['transcript'][0]['max_payload'] == 512
+
+
+def test_flaky_readback_with_correct_majority_is_written_majority(stick, tmp_path):
+    # tz 区域（1410..1509）里一个扇区在三次回读中只有一次读错：多数正确 -> written_majority，不算通过
+    plan = make_plan(tmp_path, stick, [('tz', 'tz', 1410, tz_payload())])
+    stick.flaky = {1420: {4}}  # 第 1 次：前像；第 2-4 次：三次回读
+    report, folder = run(plan, stick)
+    rb = report['readback'][0]
+    assert report['status'] == 'written_majority' and not report['passed']
+    assert rb['majority_ok'] and not rb['ok'] and rb['mismatched_sectors_per_pass'] == [0, 0, 1]
+    assert rb['raw_reads_saved'] and (folder / 'readback-1410-3.bin').exists()
+
+
+def test_majority_wrong_is_readback_mismatch(stick, tmp_path):
+    plan = make_plan(tmp_path, stick, [('tz', 'tz', 1410, tz_payload())])
+    stick.flaky = {1420: {2, 3}}  # 两次回读读错 -> 多数错误
+    report, _ = run(plan, stick)
+    rb = report['readback'][0]
+    assert report['status'] == 'readback_mismatch' and rb['majority_wrong_list'] == [1420]

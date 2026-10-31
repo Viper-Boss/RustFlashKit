@@ -40,6 +40,50 @@ def sector_digests(reader, first, count, progress=None, label=''):
     return whole.hexdigest(), per
 
 
+KEEP_READBACK_BYTES = 16 << 20  # 不超过这个大小的段，另存每次回读的原始数据，供离线分析
+
+
+def readback_against_payload(reader, seg, folder, progress=None):
+    """回读 READBACK_PASSES 次，每次逐扇区与载荷文件比较。
+    返回每次的摘要、不符扇区数，以及“每个扇区是否多数（≥2 次）等于载荷”。"""
+    keep = seg['sectors'] * gpt.SECTOR <= KEEP_READBACK_BYTES
+    bad_counts = {}
+    passes, mismatched = [], []
+    for k in range(READBACK_PASSES):
+        h = hashlib.sha256()
+        bad = 0
+        sink = open(folder / f'readback-{seg["first_sector"]}-{k + 1}.bin', 'xb') if keep else None
+        try:
+            with open(seg['path'], 'rb') as payload:
+                done = 0
+                while done < seg['sectors']:
+                    n = min(backup.CHUNK_SECTORS, seg['sectors'] - done)
+                    data = backup.checked_read(reader, seg['first_sector'] + done, n)
+                    h.update(data)
+                    if sink:
+                        sink.write(data)
+                    want = payload.read(len(data))
+                    if data != want:
+                        for offset in backup.differing_sectors(data, want):
+                            sector = seg['first_sector'] + done + offset // gpt.SECTOR
+                            bad_counts[sector] = bad_counts.get(sector, 0) + 1
+                            bad += 1
+                    done += n
+                    if progress:
+                        progress(f'回读 {seg["first_sector"]} 第 {k + 1} 次', done, seg['sectors'])
+        finally:
+            if sink:
+                sink.close()
+        passes.append(h.hexdigest())
+        mismatched.append(bad)
+    minority = sorted(s for s, c in bad_counts.items() if c * 2 > READBACK_PASSES)
+    return {'first_sector': seg['first_sector'], 'expected': seg['sha256'], 'passes': passes,
+            'mismatched_sectors_per_pass': mismatched, 'sectors_ever_mismatched': len(bad_counts),
+            'sectors_majority_wrong': len(minority), 'majority_wrong_list': minority[:200],
+            'ok': all(p == seg['sha256'] for p in passes), 'majority_ok': not minority,
+            'raw_reads_saved': keep}
+
+
 def compare_protected(before1, before2, after):
     """逐扇区：读得稳且变了 -> changed；本来不稳且与两次写前读数都不同 -> unprovable。"""
     changed = unprovable = unstable = 0
@@ -148,19 +192,15 @@ def run_step(plan, step_name, confirm, reader, ep_out, ep_in, log=print, progres
     # 6. 目标区回读三次
     report['status'] = 'verifying'
     write_report(folder, report)
-    readback = []
-    for seg in segments:
-        passes = [backup.hash_range(reader, seg['first_sector'], seg['sectors'], None, progress,
-                                    f'回读 {seg["first_sector"]} 第 {k + 1} 次') for k in range(READBACK_PASSES)]
-        readback.append({'first_sector': seg['first_sector'], 'expected': seg['sha256'], 'passes': passes,
-                         'ok': all(p == seg['sha256'] for p in passes)})
+    readback = [readback_against_payload(reader, seg, folder, progress) for seg in segments]
     report['readback'] = readback
 
     # 7. 保护区写后核对
     results = []
     for row, ((_s1, d1), (_s2, d2)) in zip(protected, pre):
         _sha, after = sector_digests(reader, row['first_sector'], row['sectors'], progress, f'保护区 {row["name"]} 写后读')
-        results.append({'name': row['name'], **compare_protected(d1, d2, after)})
+        changed = [row['first_sector'] + i for i, (a, b, c) in enumerate(zip(d1, d2, after)) if a == b and c != a]
+        results.append({'name': row['name'], **compare_protected(d1, d2, after), 'changed_list': changed[:200]})
     report['protected_after'] = results
 
     # 8. GPT 核对
@@ -168,12 +208,14 @@ def run_step(plan, step_name, confirm, reader, ep_out, ep_in, log=print, progres
     report['gpt_after_sha256'] = new_layout['gpt_sha256']
     expected_gpt = step.get('expected_gpt_after_sha256') or step['expected_gpt_sha256']
 
-    if not all(r['ok'] for r in readback):
+    if not all(r['majority_ok'] for r in readback):
         report['status'] = 'readback_mismatch'
     elif any(r['changed_sectors'] for r in results):
         report['status'] = 'protected_changed'
     elif new_layout['gpt_sha256'] != expected_gpt:
         report['status'] = 'gpt_mismatch'
+    elif not all(r['ok'] for r in readback):
+        report['status'] = 'written_majority'  # 每个扇区多数回读等于载荷，但有读数在跳；不算通过
     elif any(r['unprovable_sectors'] for r in results):
         report['status'] = 'written_unprovable'
     else:
