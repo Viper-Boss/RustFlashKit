@@ -90,8 +90,13 @@ def check_loader(path, allow_unknown):
 class EdlLink:
     """一次 EDL 会话：Sahara 上传加载器 -> Firehose。所有写方法都被 guard 禁用。"""
 
-    def __init__(self, loader, mode, port, log=print):
-        self.policy = guard.ReadOnlyPolicy()
+    def __init__(self, loader, mode, port, log=print, write_payload=None):
+        """write_payload 不为空时是受限写入会话：连接时那一次 configure 就是 SkipWrite=0、块大小为该值。
+        edl 自身的写入方法仍全部禁用；实际写入只走 firehose_write。"""
+        if write_payload is not None and mode != 'usb':
+            raise LinkError('写入只支持 USB（WinUSB）方式')
+        self.policy = guard.ReadOnlyPolicy(write_payload)
+        self.write_payload = write_payload
         self.log = log
         old_argv = sys.argv
         try:
@@ -104,9 +109,9 @@ class EdlLink:
         guard.install(firehose, self.policy)
         cap_serial_reads()
         args = dict(edl_module.args)
-        args.update({'--loader': str(loader), '--memory': 'emmc', '--skipwrite': True,
-                     '--maxpayload': '32768', '--sectorsize': '512', '--vid': '0x05c6', '--pid': '0x9008',
-                     'printgpt': False})
+        args.update({'--loader': str(loader), '--memory': 'emmc', '--skipwrite': write_payload is None,
+                     '--maxpayload': str(write_payload or 32768), '--sectorsize': '512', '--vid': '0x05c6',
+                     '--pid': '0x9008', 'printgpt': False})
         if mode == 'serial':
             args.update({'--serial': True, '--portname': '\\\\.\\' + port if not port.startswith('\\') else port})
         elif mode == 'usb':
@@ -127,6 +132,11 @@ class EdlLink:
         fh = self.client.fh.firehose
         if fh.cfg.MemoryName.lower() != 'emmc':
             raise LinkError('设备存储类型不是 eMMC')
+        if write_payload is not None:
+            if bool(fh.cfg.SkipWrite) or int(fh.cfg.MaxPayloadSizeToTargetInBytes) != write_payload:
+                raise LinkError(f'加载器接受的写入配置与预期不同（SkipWrite={fh.cfg.SkipWrite}，'
+                                f'块大小 {fh.cfg.MaxPayloadSizeToTargetInBytes}，预期 {write_payload}），未写入')
+            log(f'写入会话：连接时已配置 SkipWrite=0、块大小 {write_payload}')
         self.fh = fh
 
     def device_info(self):

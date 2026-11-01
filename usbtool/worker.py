@@ -117,7 +117,19 @@ def run(job, link_factory=None):
         link_factory = edl_link.EdlLink
     if WATCHDOG is not None:
         WATCHDOG.arm('connect', CONNECT_LIMIT)
-    link = link_factory(job['loader'], job['mode'], job.get('port', ''), log=lambda m: emit('log', message=m))
+    write_payload = plan = None
+    if job['action'] == 'write':
+        from . import firehose_write, writeplan
+        plan = writeplan.load_plan(job['plan'])
+        step = writeplan.find_step(plan, job['step'])
+        digest = writeplan.step_digest(plan, step)
+        if len(job['confirm']) < 16 or not digest.startswith(job['confirm'].lower()):
+            raise ValueError(f'--confirm 与步骤摘要不符（{digest}），未连接设备')
+        write_payload = firehose_write.chunk_size(step['segments'])
+        link = link_factory(job['loader'], job['mode'], job.get('port', ''), log=lambda m: emit('log', message=m),
+                            write_payload=write_payload)
+    else:
+        link = link_factory(job['loader'], job['mode'], job.get('port', ''), log=lambda m: emit('log', message=m))
     if WATCHDOG is not None:
         WATCHDOG.arm('read', STALL_LIMIT)
     try:
@@ -132,12 +144,15 @@ def run(job, link_factory=None):
             layout, _p, _b = backup.read_layout(link.read, link.set_disk_sectors)
             emit('result', action='probe', device=device, layout=layout, warnings=policy.ufi003_warnings(layout))
         elif job['action'] == 'write':
-            from . import __version__, write_runner, writeplan
-            plan = writeplan.load_plan(job['plan'])
+            from . import __version__, write_runner
+            if device.get('msm_id') is None:
+                raise ValueError('设备连接前已处于 Firehose 模式，本次 configure 不是加载器启动后的第一次，'
+                                 '加载器可能忽略 SkipWrite=0。请拔插重新进入 9008 后立即执行写入；未写入')
             ep_out, ep_in = link.endpoints()
             report, folder = write_runner.run_step(plan, job['step'], job['confirm'], link.read, ep_out, ep_in,
                                                    log=lambda m: emit('log', message=m), progress=progress,
-                                                   on_disk_sectors=link.set_disk_sectors, tool_version=__version__)
+                                                   on_disk_sectors=link.set_disk_sectors, tool_version=__version__,
+                                                   preconfigured_payload=write_payload)
             emit('result', action='write', folder=str(folder), status=report['status'], passed=report['passed'])
         else:
             folder = backup.new_backup_dir(job.get('backup_base') or paths.backups_dir())

@@ -118,7 +118,9 @@ def program_xml(first_sector, sectors):
 class WriteSession:
     """按固定顺序：configure（SkipWrite=0）一次 → 每段 program → 原始数据 → 最终 ACK。状态错乱即失败。"""
 
-    def __init__(self, ep_out, ep_in, segments, log=print, progress=None, reply_timeout=REPLY_TIMEOUT):
+    def __init__(self, ep_out, ep_in, segments, log=print, progress=None, reply_timeout=REPLY_TIMEOUT,
+                 preconfigured_payload=None):
+        """preconfigured_payload：连接时已经发过 SkipWrite=0 的 configure（块大小为该值），本会话不再发第二次。"""
         self.out, self.inp = ep_out, ep_in
         self.segments = list(segments)
         self.log, self.progress = log, progress
@@ -127,6 +129,12 @@ class WriteSession:
         self.transcript = []
         self.index = 0
         self.chunk = chunk_size(self.segments)
+        if preconfigured_payload is not None:
+            if preconfigured_payload != self.chunk:
+                self.fail(f'连接时配置的块大小 {preconfigured_payload} 与本步需要的 {self.chunk} 不同')
+            self.transcript.append({'phase': 'configured', 'step': 'configure', 'max_payload': self.chunk,
+                                    'note': '连接时已发送唯一一次 configure（SkipWrite=0）'})
+            self.phase = 'configured'
 
     def fail(self, message):
         phase, self.phase = self.phase, 'failed'

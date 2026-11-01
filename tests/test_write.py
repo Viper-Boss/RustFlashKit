@@ -31,6 +31,7 @@ class FakeTarget:
         self.writes_enabled = False
         self.fault = None
         self.max_payload = None
+        self.configures = 0
         self.pending_zlp = False
         self.bad_stream = False
         self.out = self.Out(self)
@@ -52,11 +53,13 @@ class FakeTarget:
                     return 0
                 cmd = ET.fromstring(data)[0]
                 if cmd.tag == 'configure':
-                    t.writes_enabled = cmd.get('SkipWrite') == '0'
-                    t.max_payload = int(cmd.get('MaxPayloadSizeToTargetInBytes'))
+                    t.configures += 1
+                    if t.configures == 1:  # 模拟真机（2026-11-01）：加载器只认第一次 configure，之后的照样回 ACK
+                        t.writes_enabled = cmd.get('SkipWrite') == '0'
+                        t.max_payload = int(cmd.get('MaxPayloadSizeToTargetInBytes'))
                     t.reply('ACK')
                 elif cmd.tag == 'program':
-                    if t.fault == 'nak_program' or not t.writes_enabled:
+                    if t.fault == 'nak_program':
                         t.reply('NAK', log='ACK would be nice')  # 日志里的 ACK 不能被当成 ACK
                         return len(data)
                     if t.fault == 'silent':
@@ -87,7 +90,8 @@ class FakeTarget:
                     return len(data)
                 if t.fault == 'corrupt':
                     buf[100] ^= 1
-                t.disk.data[start * 512:(start + count) * 512] = buf
+                if t.writes_enabled:
+                    t.disk.data[start * 512:(start + count) * 512] = buf
                 if t.fault == 'collateral':
                     t.disk.data[150 * 512] ^= 0xFF  # 意外改动 modem 区域
                 t.raw = None
@@ -387,3 +391,77 @@ def test_majority_wrong_is_readback_mismatch(stick, tmp_path):
     report, _ = run(plan, stick)
     rb = report['readback'][0]
     assert report['status'] == 'readback_mismatch' and rb['majority_wrong_list'] == [1420]
+
+
+def test_second_configure_ignored_reproduces_not_written(stick, tmp_path):
+    """真机 2026-11-01：连接时先 SkipWrite=1，再发 SkipWrite=0，加载器都回 ACK 但没写。旧写法应判为 not_written。"""
+    plan = writeplan.load_plan(make_plan(tmp_path, stick, [('tz', 'tz', 1410, tz_payload())]))
+    target = FakeTarget(stick)
+    target.out.write(b'<?xml version="1.0" ?><data><configure MemoryName="eMMC" SkipWrite="1" '
+                     b'MaxPayloadSizeToTargetInBytes="2048" /></data>')  # 与本步块大小相同，只差 SkipWrite
+    target.inp.read(4096)
+    before = stick.range(1410, 1509)
+    digest = writeplan.step_digest(plan, plan['steps'][0])
+    report, _ = write_runner.run_step(plan, 'tz', digest, stick.read, target.out, target.inp, log=lambda m: None)
+    assert report['status'] == 'not_written' and stick.range(1410, 1509) == before
+    assert report['readback'][0]['looks_unwritten']
+
+
+def test_preconfigured_write_session_writes(stick, tmp_path):
+    plan = writeplan.load_plan(make_plan(tmp_path, stick, [('tz', 'tz', 1410, tz_payload())]))
+    chunk = firehose_write.chunk_size(plan['steps'][0]['segments'])
+    target = FakeTarget(stick)
+    target.out.write(firehose_write.configure_xml(chunk))  # 连接时唯一一次 configure
+    target.inp.read(4096)
+    digest = writeplan.step_digest(plan, plan['steps'][0])
+    report, _ = write_runner.run_step(plan, 'tz', digest, stick.read, target.out, target.inp, log=lambda m: None,
+                                      preconfigured_payload=chunk)
+    assert report['status'] == 'verified' and target.configures == 1
+    assert report['transcript'][0]['note'].startswith('连接时')
+
+
+def test_preconfigured_payload_must_match_step_chunk():
+    with pytest.raises(firehose_write.WriteFailed, match='块大小'):
+        firehose_write.WriteSession(None, None, [{'sectors': 34, 'first_sector': 0, 'sha256': '0' * 64}],
+                                    preconfigured_payload=16384)
+
+
+def test_guard_write_configure_rules():
+    from usbtool import guard
+    head = '<?xml version="1.0" ?><data><configure MemoryName="eMMC" '
+    p = guard.ReadOnlyPolicy(write_payload=512)
+    p.check(head + 'SkipWrite="0" MaxPayloadSizeToTargetInBytes="512" /></data>')
+    for bad in ('SkipWrite="1" MaxPayloadSizeToTargetInBytes="512"', 'SkipWrite="0" MaxPayloadSizeToTargetInBytes="16384"'):
+        with pytest.raises(guard.RefusedOperation):
+            p.check(head + bad + ' /></data>')
+    with pytest.raises(guard.RefusedOperation):
+        guard.ReadOnlyPolicy().check(head + 'SkipWrite="0" MaxPayloadSizeToTargetInBytes="512" /></data>')
+
+
+class StaleFirehoseLink:
+    def device_info(self):
+        return {'msm_id': None}
+
+    def endpoints(self):
+        raise AssertionError('不应走到写入')
+
+    def close(self):
+        pass
+
+
+def test_worker_write_refuses_stale_firehose_and_bad_confirm(stick, tmp_path):
+    plan_path = make_plan(tmp_path, stick, [('tz', 'tz', 1410, tz_payload())])
+    plan = writeplan.load_plan(plan_path)
+    digest = writeplan.step_digest(plan, plan['steps'][0])
+    loader = tmp_path / 'l.mbn'
+    loader.write_bytes(b'x')
+    job = {'action': 'write', 'mode': 'usb', 'loader': str(loader), 'allow_unknown_loader': True,
+           'plan': str(plan_path), 'step': 'tz', 'confirm': digest}
+    made = []
+    with pytest.raises(ValueError, match='拔插'):
+        worker.run(job, link_factory=lambda *a, **k: made.append(k) or StaleFirehoseLink())
+    assert made[0]['write_payload'] == firehose_write.chunk_size(plan['steps'][0]['segments'])
+    made.clear()
+    with pytest.raises(ValueError, match='未连接设备'):
+        worker.run({**job, 'confirm': '0' * 64}, link_factory=lambda *a, **k: made.append(k) or StaleFirehoseLink())
+    assert made == []

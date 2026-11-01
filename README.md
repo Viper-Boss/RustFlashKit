@@ -59,9 +59,10 @@ RustSimHub-UsbTool-cli.exe dryrun --backup-dir .local\backups\20261029-120000 --
 - sbl1、rpm、hyp、各备份分区（tzbak、abootbak 等）以及全部基带/NV/校准分区永远不能作为目标；重写 GPT 时，这些分区的 128 字节表项必须原样保留。
 - tz、aboot、GPT 这类启动链写入，只允许在**不是原设备布局**的设备上进行。
 - 设备当前的 GPT 摘要必须等于该步骤绑定的值。写入段必须从目标分区起点开始、不超过分区，且不与任何保护区段重叠。
-- 写入时先发送 `configure SkipWrite=0`，其中 MaxPayload 取能整除这一步每段长度的块大小（不超过 16384 的 2 的幂，最小 512），保证每一块都是满块。2026-10-30 真机上，GPT 主表按 16384+1024 发送时被加载器 NAK，且没有写入任何数据。`program` 必须先收到 `rawmode="true"` 的明确 ACK 才发数据；每块按实际写出字节核对，并补零长度包；数据发完必须收到 `rawmode="false"` 的明确 ACK。短写、超时、NAK 一律终止，不重发。
+- **每次写入前都要拔插、重新进入 9008，然后立即执行。** 写入会话必须是加载器启动后的第一次连接：连接时只发送一次 `configure`（SkipWrite=0，块大小也在这时确定）。2026-11-01 真机上，先发 SkipWrite=1、再发 SkipWrite=0，加载器两次都回 ACK，但数据没有写入。设备已处于 Firehose 模式（之前连接过）时，工具会拒绝写入。
+- 连接时 configure 里的 MaxPayload 取能整除这一步每段长度的块大小（不超过 16384 的 2 的幂，最小 512），保证每一块都是满块。2026-10-30 真机上，GPT 主表按 16384+1024 发送时被加载器 NAK，且没有写入任何数据。`program` 必须先收到 `rawmode="true"` 的明确 ACK 才发数据；每块按实际写出字节核对，并补零长度包；数据发完必须收到 `rawmode="false"` 的明确 ACK。短写、超时、NAK 一律终止，不重发。
 - 写前：保护区读两遍，记下哪些扇区读得稳；目标区的原内容另存为前像。写后：目标区回读三遍，每遍都要等于载荷；保护区再读一遍，逐扇区比较；重新读 GPT 核对摘要。
-- 结果写在 `.local\writes\<时间>\report.json`，状态为下列之一：`verified`、`written_majority`（每个扇区三次回读中至少两次等于载荷，但有读数在跳；不算通过，每次回读的原始数据另存在报告目录）、`written_unprovable`（有保护扇区本来就读不稳，无法证明它们未变）、`readback_mismatch`、`protected_changed`、`gpt_mismatch`、`write_failed`。
+- 结果写在 `.local\writes\<时间>\report.json`，状态为下列之一：`verified`、`not_written`（设备回了 ACK，但回读仍是写入前的旧内容）、`written_majority`（每个扇区三次回读中至少两次等于载荷，但有读数在跳；不算通过，每次回读的原始数据另存在报告目录）、`written_unprovable`（有保护扇区本来就读不稳，无法证明它们未变）、`readback_mismatch`、`protected_changed`、`gpt_mismatch`、`write_failed`。
 - 每一步执行前都会在 `.local\write-attempts\` 写一个标记，同一步不能被自动再次执行。不会自动重启设备。
 
 ## 安全设计

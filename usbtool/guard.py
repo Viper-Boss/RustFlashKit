@@ -21,9 +21,12 @@ class RefusedOperation(RuntimeError):
 
 
 class ReadOnlyPolicy:
-    def __init__(self):
+    def __init__(self, write_payload=None):
         self.disk_sectors = MAX_SECTORS
         self.allow_reset = False
+        # 只有受限写入会话在连接时设置：连接时那一次 configure 必须是 SkipWrite=0 且块大小正好等于它。
+        # 加载器只认第一次 configure（2026-11-01 真机：先 SkipWrite=1 再 SkipWrite=0，都回 ACK，但没有写入）。
+        self.write_payload = write_payload
 
     def check(self, data):
         if isinstance(data, bytes):
@@ -48,8 +51,12 @@ class ReadOnlyPolicy:
         if tag == 'configure':
             if command.get('MemoryName', '').lower() != 'emmc':
                 raise RefusedOperation('只支持 eMMC')
-            if command.get('SkipWrite') != '1':
-                raise RefusedOperation('configure 必须保持 SkipWrite=1')
+            if self.write_payload is None:
+                if command.get('SkipWrite') != '1':
+                    raise RefusedOperation('configure 必须保持 SkipWrite=1')
+            elif command.get('SkipWrite') != '0' or \
+                    command.get('MaxPayloadSizeToTargetInBytes') != str(self.write_payload):
+                raise RefusedOperation(f'写入会话的 configure 必须是 SkipWrite=0 且块大小为 {self.write_payload}')
         elif tag == 'read':
             allowed = {'SECTOR_SIZE_IN_BYTES', 'num_partition_sectors', 'physical_partition_number', 'start_sector'}
             if set(command.attrib) != allowed:

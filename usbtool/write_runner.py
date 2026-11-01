@@ -43,18 +43,18 @@ def sector_digests(reader, first, count, progress=None, label=''):
 KEEP_READBACK_BYTES = 16 << 20  # 不超过这个大小的段，另存每次回读的原始数据，供离线分析
 
 
-def readback_against_payload(reader, seg, folder, progress=None):
+def readback_against_payload(reader, seg, folder, progress=None, old_path=None):
     """回读 READBACK_PASSES 次，每次逐扇区与载荷文件比较。
     返回每次的摘要、不符扇区数，以及“每个扇区是否多数（≥2 次）等于载荷”。"""
     keep = seg['sectors'] * gpt.SECTOR <= KEEP_READBACK_BYTES
-    bad_counts = {}
+    bad_counts, old_counts = {}, {}
     passes, mismatched = [], []
     for k in range(READBACK_PASSES):
         h = hashlib.sha256()
         bad = 0
         sink = open(folder / f'readback-{seg["first_sector"]}-{k + 1}.bin', 'xb') if keep else None
         try:
-            with open(seg['path'], 'rb') as payload:
+            with open(seg['path'], 'rb') as payload, open(old_path or os.devnull, 'rb') as old:
                 done = 0
                 while done < seg['sectors']:
                     n = min(backup.CHUNK_SECTORS, seg['sectors'] - done)
@@ -63,11 +63,14 @@ def readback_against_payload(reader, seg, folder, progress=None):
                     if sink:
                         sink.write(data)
                     want = payload.read(len(data))
+                    before = old.read(len(data)) if old_path else b''
                     if data != want:
                         for offset in backup.differing_sectors(data, want):
                             sector = seg['first_sector'] + done + offset // gpt.SECTOR
                             bad_counts[sector] = bad_counts.get(sector, 0) + 1
                             bad += 1
+                            if before[offset:offset + gpt.SECTOR] == data[offset:offset + gpt.SECTOR]:
+                                old_counts[sector] = old_counts.get(sector, 0) + 1
                     done += n
                     if progress:
                         progress(f'回读 {seg["first_sector"]} 第 {k + 1} 次', done, seg['sectors'])
@@ -77,7 +80,9 @@ def readback_against_payload(reader, seg, folder, progress=None):
         passes.append(h.hexdigest())
         mismatched.append(bad)
     minority = sorted(s for s, c in bad_counts.items() if c * 2 > READBACK_PASSES)
-    return {'first_sector': seg['first_sector'], 'expected': seg['sha256'], 'passes': passes,
+    still_old = [s for s in minority if old_counts.get(s, 0) * 2 > READBACK_PASSES]
+    return {'sectors_majority_old': len(still_old),
+            'looks_unwritten': bool(minority) and len(still_old) == len(minority),'first_sector': seg['first_sector'], 'expected': seg['sha256'], 'passes': passes,
             'mismatched_sectors_per_pass': mismatched, 'sectors_ever_mismatched': len(bad_counts),
             'sectors_majority_wrong': len(minority), 'majority_wrong_list': minority[:200],
             'ok': all(p == seg['sha256'] for p in passes), 'majority_ok': not minority,
@@ -118,7 +123,7 @@ def write_report(folder, report):
 
 
 def run_step(plan, step_name, confirm, reader, ep_out, ep_in, log=print, progress=None, on_disk_sectors=None,
-             tool_version=''):
+             tool_version='', preconfigured_payload=None):
     step = writeplan.find_step(plan, step_name)
     digest = writeplan.step_digest(plan, step)
     if not (isinstance(confirm, str) and len(confirm) >= 16 and digest.startswith(confirm.lower())):
@@ -176,9 +181,11 @@ def run_step(plan, step_name, confirm, reader, ep_out, ep_in, log=print, progres
     # 5. 写入
     report['status'] = 'writing'
     write_report(folder, report)
-    session = WriteSession(ep_out, ep_in, segments, log=log, progress=progress)
+    session = WriteSession(ep_out, ep_in, segments, log=log, progress=progress,
+                           preconfigured_payload=preconfigured_payload)
     try:
-        session.configure()
+        if preconfigured_payload is None:
+            session.configure()
         for seg in segments:
             log(f'写入扇区 {seg["first_sector"]} 起 {seg["sectors"]} 个')
             with open(seg['path'], 'rb') as stream:
@@ -192,7 +199,8 @@ def run_step(plan, step_name, confirm, reader, ep_out, ep_in, log=print, progres
     # 6. 目标区回读三次
     report['status'] = 'verifying'
     write_report(folder, report)
-    readback = [readback_against_payload(reader, seg, folder, progress) for seg in segments]
+    readback = [readback_against_payload(reader, seg, folder, progress, folder / pre['file'])
+                for seg, pre in zip(segments, report['preimage'])]
     report['readback'] = readback
 
     # 7. 保护区写后核对
@@ -209,7 +217,9 @@ def run_step(plan, step_name, confirm, reader, ep_out, ep_in, log=print, progres
     expected_gpt = step.get('expected_gpt_after_sha256') or step['expected_gpt_sha256']
 
     if not all(r['majority_ok'] for r in readback):
-        report['status'] = 'readback_mismatch'
+        wrong = [r for r in readback if not r['majority_ok']]
+        # 写错的扇区读出来全是写入前的旧内容：设备回了 ACK 但没有写入
+        report['status'] = 'not_written' if all(r['looks_unwritten'] for r in wrong) else 'readback_mismatch'
     elif any(r['changed_sectors'] for r in results):
         report['status'] = 'protected_changed'
     elif new_layout['gpt_sha256'] != expected_gpt:
