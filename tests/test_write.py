@@ -465,3 +465,18 @@ def test_worker_write_refuses_stale_firehose_and_bad_confirm(stick, tmp_path):
     with pytest.raises(ValueError, match='未连接设备'):
         worker.run({**job, 'confirm': '0' * 64}, link_factory=lambda *a, **k: made.append(k) or StaleFirehoseLink())
     assert made == []
+
+
+def test_device_event_keeps_loader_digest_in_write_jobs(stick, tmp_path, capsys):
+    plan_path = make_plan(tmp_path, stick, [('tz', 'tz', 1410, tz_payload())])
+    plan = writeplan.load_plan(plan_path)
+    step_sha = writeplan.step_digest(plan, plan['steps'][0])
+    loader = tmp_path / 'l.mbn'
+    loader.write_bytes(b'x')
+    job = {'action': 'write', 'mode': 'usb', 'loader': str(loader), 'allow_unknown_loader': True,
+           'plan': str(plan_path), 'step': 'tz', 'confirm': step_sha}
+    with pytest.raises(ValueError):
+        worker.run(job, link_factory=lambda *a, **k: StaleFirehoseLink())
+    events = [worker.parse_line(l) for l in capsys.readouterr().out.splitlines() if l.startswith(worker.PREFIX)]
+    device = next(e['device'] for e in events if e['type'] == 'device')
+    assert device['loader_sha256'] == hashlib.sha256(b'x').hexdigest() != step_sha

@@ -122,9 +122,9 @@ def run(job, link_factory=None):
         from . import firehose_write, writeplan
         plan = writeplan.load_plan(job['plan'])
         step = writeplan.find_step(plan, job['step'])
-        digest = writeplan.step_digest(plan, step)
-        if len(job['confirm']) < 16 or not digest.startswith(job['confirm'].lower()):
-            raise ValueError(f'--confirm 与步骤摘要不符（{digest}），未连接设备')
+        step_sha = writeplan.step_digest(plan, step)
+        if len(job['confirm']) < 16 or not step_sha.startswith(job['confirm'].lower()):
+            raise ValueError(f'--confirm 与步骤摘要不符（{step_sha}），未连接设备')
         write_payload = firehose_write.chunk_size(step['segments'])
         link = link_factory(job['loader'], job['mode'], job.get('port', ''), log=lambda m: emit('log', message=m),
                             write_payload=write_payload)
