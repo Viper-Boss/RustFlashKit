@@ -6,7 +6,7 @@ import os
 import sys
 import threading
 
-from . import backup, detect, dryrun, paths, worker
+from . import backup, detect, dryrun, emmc_life, paths, worker
 
 
 PROBE_TIMEOUT = 300  # 秒；与界面一致。工作进程自身另有看门狗
@@ -47,6 +47,9 @@ def _pump(proc, code):
                     print(f'{p["index"]:>3} {p["name"]:<12} 起始 {p["first_sector"]:>10} 大小 {p["bytes"]:>12}')
                 for w in event['warnings']:
                     print('提示：' + w)
+            elif event['action'] == 'storage':
+                print(emmc_life.format_report(event['report']))
+                code = 0 if event['report']['available'] else 1
             elif event['action'] == 'write':
                 code = 0 if event['passed'] else 1
                 print(f'\n写入步骤结束：{event["status"]}（报告：{event["folder"]}；未自动重启设备）')
@@ -109,6 +112,14 @@ def main(argv):
             p.add_argument('--plan', required=True)
             p.add_argument('--step', required=True, help='只执行这一步')
             p.add_argument('--confirm', required=True, help='步骤摘要（write-dryrun 会给出；至少前 16 位）')
+    life = sub.add_parser('emmc-life', help='只读取 eMMC 寿命：开机状态用 --identity/--known-hosts，9008 状态用 --loader')
+    life.add_argument('--ssh', default='root@10.55.0.2', help='开机状态的设备地址（默认 root@10.55.0.2）')
+    life.add_argument('--identity', help='维护 SSH 私钥文件')
+    life.add_argument('--known-hosts', help='含设备主机公钥的 known_hosts（必须提供，不做首次自动信任）')
+    life.add_argument('--loader', help='9008 状态的加载器；是否读得到取决于加载器')
+    life.add_argument('--allow-unknown-loader', action='store_true')
+    life.add_argument('--mode', choices=('serial', 'usb'))
+    life.add_argument('--port', default='')
     w = sub.add_parser('write-dryrun', help='离线核对写入计划（不打开 USB）')
     w.add_argument('--plan', required=True)
     w.add_argument('--backup-dir', required=True, help='含当前设备 gpt-primary.bin / gpt-backup.bin 的备份目录')
@@ -131,6 +142,14 @@ def main(argv):
         for n in notes:
             print('提示：' + n)
         return 0 if devices else 1
+    if args.command == 'emmc-life' and not args.loader:
+        try:
+            report = emmc_life.read_over_ssh(args.ssh, args.identity, args.known_hosts)
+        except emmc_life.LifeError as err:
+            print(f'错误：{err}', file=sys.stderr)
+            return 1
+        print(emmc_life.format_report(report))
+        return 0 if report['available'] else 1
     if args.command == 'write-dryrun':
         from . import write_runner, writeplan
         try:
@@ -148,7 +167,7 @@ def main(argv):
             else:
                 print(f'[拒绝] {r["step"]}：' + '；'.join(r['errors']))
         return 0 if reports and all(r['passed'] for r in reports) else 1
-    if args.command in ('probe', 'backup', 'write'):
+    if args.command in ('probe', 'backup', 'write', 'emmc-life'):
         mode, port = args.mode, args.port
         if mode is None:
             devices, _ = detect.detect()
@@ -156,14 +175,14 @@ def main(argv):
                 print(f'需要恰好一个 9008 设备，现在找到 {len(devices)} 个', file=sys.stderr)
                 return 1
             mode, port = devices[0]['mode'], devices[0]['port']
-        job = {'action': args.command, 'loader': os.path.abspath(args.loader), 'allow_unknown_loader': args.allow_unknown_loader,
+        job = {'action': 'storage' if args.command == 'emmc-life' else args.command, 'loader': os.path.abspath(args.loader), 'allow_unknown_loader': args.allow_unknown_loader,
                'mode': mode, 'port': port, 'reset_after': getattr(args, 'reset_after', False)}
         if args.command == 'backup':
             job.update(partitions=args.partition, reread=not args.no_reread, vote=args.vote, keep_reads=args.keep_reads,
                        backup_base=str(paths.backups_dir()))
         if args.command == 'write':
             job.update(plan=os.path.abspath(args.plan), step=args.step, confirm=args.confirm)
-        return _run_job(job, PROBE_TIMEOUT if args.command == 'probe' else None)
+        return _run_job(job, PROBE_TIMEOUT if args.command in ('probe', 'emmc-life') else None)
     if args.command == 'verify':
         manifest, errors = backup.verify_backup(args.folder)
         for e in errors:

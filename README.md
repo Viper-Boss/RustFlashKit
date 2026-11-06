@@ -9,6 +9,7 @@
 | 识别 9008（EDL）设备：高通 QDLoader 驱动（COM 口）或 WinUSB/libusb | 已实现；2026-10-29 实机通过（USB/WinUSB 方式） |
 | 上传 Firehose 加载器、读主/备 GPT 并校验 CRC 和一致性 | 已实现；2026-10-29 实机通过（USB/WinUSB 方式） |
 | 按分区或全盘备份到本地，长度 + SHA256 + 二次回读校验，离线复核；回读不一致时定位扇区，可选第三遍多数表决另存“尽力而为”镜像（标为未验证，演练不会采用） | 已实现；实机上正确识别出一块读不稳的二手 eMMC 并拒绝备份；在稳定设备上完整通过尚未实测 |
+| 读取 eMMC 寿命（只读）：开机状态经维护 SSH 读 sysfs；9008 状态经 getstorageinfo，能否读到取决于加载器 | 已实现，模拟测试通过；**未经实机验证** |
 | 刷写演练：只核对，不连接设备、不写入 | 已实现，测试通过 |
 | 受限写入（按计划文件一次一步，只限命令行、只限 USB 方式） | 已实现，模拟设备测试通过；**从未对真实设备写入过**，每次真实写入都需要用户单独批准 |
 | 经 USB 重连 Wi-Fi：工具自有密钥配对/登录、读取网络列表、试连接/确认/取消（45 秒自动回滚） | 工具端已实现，模拟测试通过；**需要设备端先改 3 处**（`docs/DEVICE-SIDE-WIFI-AUTH.md`），未经实机验证 |
@@ -46,6 +47,24 @@ RustSimHub-UsbTool-cli.exe dryrun --backup-dir .local\backups\20261029-120000 --
 3. 首次授权：在设备网页上（主人登录）打开配对窗口 → 回到工具点“申请授权” → 在网页上核对申请编号和工具公钥后批准。工具只申请 `status.read` 和 `network.manage` 两项权限。
 4. 以后每次只需“登录” → 读取网络列表或手动输入 → “试连接” → 状态变成“已连上”后点“确认保存”。45 秒内不确认，设备会自动恢复原网络。结果不明时只能“重新查询”（用同一个编号），不会自动重做。
 5. 工具私钥用 Windows DPAPI 加密保存在 `.local/edge/client.key`，只有当前 Windows 账号能解开；在设备网页上撤销授权即可让它失效。
+
+## 读取 eMMC 寿命
+
+寿命和保留块状态存在 eMMC 的 EXT_CSD 里，由芯片自己估算，只分 10% 一档。eMMC 5.0 之前的芯片可能不提供，工具会显示“无法判断”，不会说成正常。
+
+- **开机状态（可靠）**：棒子正常运行 RustSimHub 系统时，经 USB 网络和维护 SSH 执行一条固定的只读命令，读 `/sys/block/mmcblk0/device/` 下的 `life_time`、`pre_eol_info`。只用公钥登录，必须提供 known_hosts 严格核对主机。不读序列号，也没有任意命令入口。需要系统里有 OpenSSH 客户端。
+
+```
+RustSimHub-UsbTool-cli.exe emmc-life --identity <维护私钥> --known-hosts <known_hosts 文件>
+```
+
+- **9008 状态（看加载器）**：标准 Firehose 没有读 EXT_CSD 的命令，只能试 `getstorageinfo`。UFI003 常用的 8916 加载器不支持，工具会如实提示。工具不会为此读写芯片寄存器。
+
+```
+RustSimHub-UsbTool-cli.exe emmc-life --loader <加载器> --mode usb
+```
+
+图形界面在“芯片寿命”页。
 
 ## 受限写入（命令行）
 

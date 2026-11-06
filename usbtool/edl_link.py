@@ -154,6 +154,14 @@ class EdlLink:
             raise LinkError(f'芯片 MSM_ID {info["msm_id"]} 不是 MSM8916，停止')
         return info
 
+    def storage_info(self):
+        """只读：Firehose getstorageinfo。加载器不支持或被护栏拒绝时返回 None。"""
+        try:
+            return self.fh.cmd_getstorageinfo()
+        except guard.RefusedOperation as err:
+            self.log(f'存储查询被只读护栏拒绝：{err}')
+            return None
+
     def endpoints(self):
         """写入用的原始 USB 端点。串口方式不支持写入。"""
         cdc = self.client.cdc

@@ -14,7 +14,7 @@ import traceback
 from . import backup, paths, policy
 
 PREFIX = '@@USBTOOL '
-ACTIONS = ('probe', 'backup', 'write')
+ACTIONS = ('probe', 'backup', 'write', 'storage')
 # 看门狗时限（秒）：连接阶段为整体上限；读取阶段为“多久没有任何进展”的上限。
 CONNECT_LIMIT = 90
 STALL_LIMIT = 120
@@ -140,7 +140,10 @@ def run(job, link_factory=None):
         def progress(label, done, total):
             emit('progress', label=label, done=done, total=total)
 
-        if job['action'] == 'probe':
+        if job['action'] == 'storage':
+            from . import emmc_life
+            emit('result', action='storage', report=emmc_life.from_firehose(link.storage_info()))
+        elif job['action'] == 'probe':
             layout, _p, _b = backup.read_layout(link.read, link.set_disk_sectors)
             emit('result', action='probe', device=device, layout=layout, warnings=policy.ufi003_warnings(layout))
         elif job['action'] == 'write':

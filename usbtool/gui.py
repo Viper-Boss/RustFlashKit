@@ -7,7 +7,7 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from . import __version__, backup, detect, dryrun, header, paths, policy, theme, worker
+from . import __version__, backup, detect, dryrun, emmc_life, header, paths, policy, theme, worker
 from .gui_wifi import WifiTab
 from .edl_link import loader_digest
 
@@ -52,6 +52,7 @@ class App:
         self.build_backup_tab(tabs)
         self.build_dryrun_tab(tabs)
         WifiTab(tabs, self)
+        self.build_life_tab(tabs)
         self.build_later_tab(tabs)
 
         bottom = ttk.Frame(root)
@@ -121,6 +122,60 @@ class App:
         ttk.Button(frame, text='运行演练', command=self.run_dryrun, style='Accent.TButton').pack(anchor='w', padx=4)
         self.dry_text = theme.text_widget(frame, height=10, wrap='word')
         self.dry_text.pack(fill='both', expand=True, padx=4, pady=4)
+
+    def build_life_tab(self, tabs):
+        frame = ttk.Frame(tabs)
+        tabs.add(frame, text='芯片寿命')
+        ttk.Label(frame, wraplength=880, justify='left', text=(
+            '只读。棒子正常开机时，经 USB 网络和维护 SSH 读取系统里的寿命信息，这是最可靠的方式。'
+            '9008 下能否读到取决于加载器，UFI003 常用的 8916 加载器不支持。')).pack(anchor='w', padx=6, pady=6)
+        self.life_ssh = tk.StringVar(value='root@10.55.0.2')
+        self.life_key = tk.StringVar()
+        self.life_hosts = tk.StringVar()
+        for row, (label, var, pick) in enumerate((('设备地址', self.life_ssh, False), ('维护 SSH 私钥', self.life_key, True),
+                                                  ('known_hosts 文件', self.life_hosts, True))):
+            line = ttk.Frame(frame)
+            line.pack(fill='x', padx=6, pady=2)
+            ttk.Label(line, text=label, width=16).pack(side='left')
+            ttk.Entry(line, textvariable=var).pack(side='left', fill='x', expand=True)
+            if pick:
+                ttk.Button(line, text='选择…', command=lambda v=var: self.pick_file(v)).pack(side='left', padx=4)
+        bar = ttk.Frame(frame)
+        bar.pack(fill='x', padx=6, pady=6)
+        self.life_button = ttk.Button(bar, text='读取（开机状态）', command=self.read_life_ssh, style='Accent.TButton')
+        self.life_button.pack(side='left')
+        ttk.Button(bar, text='读取（9008 状态）', command=self.read_life_9008).pack(side='left', padx=6)
+        self.life_text = theme.text_widget(frame, height=10, wrap='word')
+        self.life_text.pack(fill='both', expand=True, padx=6, pady=4)
+
+    def pick_file(self, var):
+        path = filedialog.askopenfilename(title='选择文件')
+        if path:
+            var.set(path)
+
+    def show_life(self, text):
+        self.life_text.delete('1.0', 'end')
+        self.life_text.insert('end', text)
+
+    def read_life_ssh(self):
+        host, key, hosts = self.life_ssh.get().strip(), self.life_key.get(), self.life_hosts.get()
+        self.life_button.config(state='disabled')
+        self.show_life('正在读取…')
+
+        def work():
+            try:
+                text = emmc_life.format_report(emmc_life.read_over_ssh(host, key, hosts))
+            except emmc_life.LifeError as err:
+                text = f'读取失败：{err}'
+            self.root.after(0, lambda: (self.show_life(text), self.life_button.config(state='normal')))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def read_life_9008(self):
+        job = self.base_job('storage')
+        if job:
+            self.show_life('正在连接 9008…')
+            self.launch(job, timeout=PROBE_TIMEOUT)
 
     def build_later_tab(self, tabs):
         frame = ttk.Frame(tabs)
@@ -255,6 +310,9 @@ class App:
             self.append_log(f'芯片：{chip}  HWID {self.device.get("hwid")}')
             if self.device.get('note'):
                 self.append_log('提示：' + self.device['note'])
+        elif kind == 'result' and event['action'] == 'storage':
+            self.show_life(emmc_life.format_report(event['report']))
+            self.banner.say('idle', '芯片寿命查询结束')
         elif kind == 'result' and event['action'] == 'probe':
             self.show_layout(event['layout'], event['warnings'])
             self.banner.say('happy', '分区表已读取：主备 GPT 一致')
@@ -268,6 +326,8 @@ class App:
             self.banner.say('worried')
             messagebox.showerror('操作失败', event['message'] + '\n\n没有自动重试，也没有自动重启设备。')
         elif kind == 'exit' and event['proc'] is self.proc:
+            if self.life_text.get('1.0', 'end').startswith('正在连接'):
+                self.show_life('读取失败，详见下方日志。未写入设备。')
             self.proc = None
             self.cancel_button.config(state='disabled')
             self.probe_button.config(state='normal')
