@@ -21,7 +21,7 @@ def stock_parts():
 
 
 class StockDisk(FakeDisk):
-    def __init__(self, parts=None, seed=5):
+    def __init__(self, parts=None, seed=5, tag=b'UFI003_CT 20211210\0'):
         parts = parts or stock_parts()
         super().__init__(DISK, parts[:16], seed=seed)
         primary, back = gpt.build_gpt(DISK, parts, count=28)
@@ -32,6 +32,12 @@ class StockDisk(FakeDisk):
         tzbak = dict((p[0], p) for p in parts).get('tzbak')
         if tz and tzbak:
             self.data[tzbak[1] * 512:(tzbak[2] + 1) * 512] = self.data[tz[1] * 512:(tz[2] + 1) * 512]
+        self.set_tag(tag)
+
+    def set_tag(self, tag):
+        modem = dict((p[0], p) for p in stock_parts())['modem']
+        at = modem[1] * 512 + 700
+        self.data[at:at + len(tag)] = tag
 
 
 @pytest.fixture(autouse=True)
@@ -340,3 +346,22 @@ def test_default_loader_only_when_known(tmp_path, monkeypatch):
     assert edl_link.default_loader() == str(loader)
     monkeypatch.setattr(paths, 'bundled_loader', lambda: None)
     assert edl_link.default_loader() is None
+
+
+@pytest.mark.parametrize('tag,match', [(b'UFI001CT 20211106\0', 'UFI001C'), (b'XXXXXXXXXXXXXXXXXXX', '未知')])
+def test_wrong_or_unknown_board_refused_before_any_write(pack_dir, tag, match):
+    disk = StockDisk(tag=tag)
+    before = bytes(disk.data)
+    with pytest.raises(oneclick.FlashStopped, match=match):
+        session(pack_dir, 'prepare', disk)
+    assert bytes(disk.data) == before
+
+
+def test_low_disk_space_refused_before_writing_images(pack_dir, monkeypatch):
+    disk = StockDisk()
+    session(pack_dir, 'prepare', disk)
+    before = bytes(disk.data)
+    monkeypatch.setattr(oneclick.shutil, 'disk_usage', lambda _p: type('U', (), {'free': 1 << 20}))
+    with pytest.raises(oneclick.FlashStopped, match='磁盘空间不够'):
+        session(pack_dir, 'images', disk)
+    assert bytes(disk.data) == before

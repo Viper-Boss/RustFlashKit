@@ -11,7 +11,7 @@ import threading
 import time
 import traceback
 
-from . import backup, paths, policy
+from . import backup, board_id, paths, policy
 
 PREFIX = '@@USBTOOL '
 ACTIONS = ('probe', 'backup', 'write', 'storage', 'flash')
@@ -172,7 +172,9 @@ def run(job, link_factory=None):
             emit('result', action='storage', report=emmc_life.from_firehose(link.storage_info()))
         elif job['action'] == 'probe':
             layout, _p, _b = backup.read_layout(link.read, link.set_disk_sectors)
-            emit('result', action='probe', device=device, layout=layout, warnings=policy.ufi003_warnings(layout))
+            board = board_id.identify(link.read, layout, progress)
+            emit('result', action='probe', device=device, layout=layout, board=board,
+                 warnings=policy.ufi003_warnings(layout))
         elif job['action'] == 'write':
             from . import __version__, write_runner
             if device.get('msm_id') is None:

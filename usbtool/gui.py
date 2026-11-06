@@ -7,7 +7,7 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from . import __version__, backup, detect, dryrun, emmc_life, header, paths, policy, theme, worker
+from . import __version__, backup, board_id, detect, dryrun, emmc_life, header, paths, policy, theme, worker
 from .gui_flash import FlashTab
 from .gui_wifi import WifiTab
 from .edl_link import default_loader, loader_digest
@@ -48,6 +48,9 @@ class App:
         self.device_box.grid(row=2, column=1, sticky='ew', padx=4)
         self.reset_after = tk.BooleanVar(value=False)
         ttk.Checkbutton(top, text='完成后让设备正常重启', variable=self.reset_after).grid(row=2, column=2, padx=4)
+        ttk.Button(top, text='识别型号', command=self.probe).grid(row=3, column=0, padx=4, pady=3, sticky='w')
+        self.board_label = ttk.Label(top, text='棒子型号：未识别（进入 9008 后点“识别型号”）')
+        self.board_label.grid(row=3, column=1, columnspan=2, sticky='w', padx=4)
         top.columnconfigure(1, weight=1)
         self.devices = []
 
@@ -322,6 +325,9 @@ class App:
             self.banner.say('idle', '芯片寿命查询结束')
         elif kind == 'result' and event['action'] == 'probe':
             self.show_layout(event['layout'], event['warnings'])
+            text = '棒子型号：' + board_id.describe(event['board'])
+            self.board_label.config(text=text)
+            self.append_log(text)
             self.banner.say('happy', '分区表已读取：主备 GPT 一致')
         elif kind == 'result':
             self.append_log(f'备份完成并校验通过：{event["folder"]}', 'ok')

@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 
-from . import backup, detect, dryrun, edl_link, emmc_life, flashpack, oneclick, paths, worker
+from . import backup, board_id, detect, dryrun, edl_link, emmc_life, flashpack, oneclick, paths, worker
 
 
 PROBE_TIMEOUT = 300  # 秒；与界面一致。工作进程自身另有看门狗
@@ -44,6 +44,7 @@ def _pump(proc, code):
         elif kind == 'result':
             code = 0
             if event['action'] == 'probe':
+                print('棒子型号：' + board_id.describe(event['board']))
                 for p in event['layout']['partitions']:
                     print(f'{p["index"]:>3} {p["name"]:<12} 起始 {p["first_sector"]:>10} 大小 {p["bytes"]:>12}')
                 for w in event['warnings']:

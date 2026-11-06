@@ -9,12 +9,17 @@
 import hashlib
 import json
 import pathlib
+import shutil
 
-from . import backup, flashpack, gpt, gpt_plan, paths, write_runner, writeplan
+from . import backup, board_id, flashpack, gpt, gpt_plan, paths, write_runner, writeplan
 
 PHASES = (('prepare', gpt.SECTOR), ('images', flashpack.BLOCK))
 BACKUP_NAMES = ('sbl1', 'sbl1bak', 'aboot', 'abootbak', 'rpm', 'rpmbak', 'tz', 'tzbak', 'hyp', 'hypbak',
                 'modem', 'modemst1', 'modemst2', 'fsc', 'fsg', 'sec', 'persist')
+
+
+PACK_BOARDS = {'ufi003': 'UFI003'}  # 刷机包清单的 board -> 棒子型号
+DISK_MARGIN = 200 << 20
 
 
 class FlashStopped(RuntimeError):
@@ -124,7 +129,12 @@ def run_session(pack_dir, phase, read, ep_out, ep_in, device, log=print, progres
         raise FlashStopped('这根棒子的分区表既不是支持的原厂布局，也不是 RustSimHub 布局，没有写入任何内容')
     if writeplan.is_original_device_layout(layout):
         raise FlashStopped('这是原设备的分区布局，一键刷机不会动它')
-    result = {'phase': phase, 'layout_state': state, 'written': [], 'skipped': [], 'reports': []}
+    board = board_id.identify(read, layout, progress)
+    log('棒子型号：' + board_id.describe(board))
+    wanted = PACK_BOARDS[manifest['board']]
+    if board['family'] != wanted:
+        raise FlashStopped(f'这个刷机包是给 {wanted} 的，这根棒子是 {board_id.describe(board)}。没有写入任何内容')
+    result = {'phase': phase, 'layout_state': state, 'board': board, 'written': [], 'skipped': [], 'reports': []}
     payload = dict(PHASES)[phase]
     if phase == 'prepare':
         result['backup'] = _preflight_backup(folder, read, layout, device, log, progress, on_disk_sectors)
@@ -144,6 +154,11 @@ def run_session(pack_dir, phase, read, ep_out, ep_in, device, log=print, progres
     if state != 'target':
         raise FlashStopped('分区表还不是 RustSimHub 布局，请从头开始一键刷机')
     plan = images_plan_file(folder, pack_dir, manifest, layout)
+    # 每一步都要先存前像：磁盘不够时不能写到一半才发现
+    need = sum(i['bytes'] for i in manifest['images'].values()) + DISK_MARGIN
+    free = shutil.disk_usage(paths.local_dir()).free
+    if free < need:
+        raise FlashStopped(f'磁盘空间不够：还剩 {free >> 20} MiB，至少需要 {need >> 20} MiB。没有写入任何内容')
     for step in plan['steps']:
         segment = step['segments'][0]
         if already_written(read, segment, progress):
