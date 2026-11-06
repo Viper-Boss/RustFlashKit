@@ -14,7 +14,7 @@ import traceback
 from . import backup, paths, policy
 
 PREFIX = '@@USBTOOL '
-ACTIONS = ('probe', 'backup', 'write', 'storage')
+ACTIONS = ('probe', 'backup', 'write', 'storage', 'flash')
 # 看门狗时限（秒）：连接阶段为整体上限；读取阶段为“多久没有任何进展”的上限。
 CONNECT_LIMIT = 90
 STALL_LIMIT = 120
@@ -99,6 +99,14 @@ def validate_job(job):
         names = job.get('partitions')
         if not isinstance(names, list) or not names or not all(isinstance(n, str) for n in names):
             raise ValueError('备份任务需要分区列表')
+    if job['action'] == 'flash':
+        from . import oneclick
+        if job['mode'] != 'usb':
+            raise ValueError('刷机只支持 USB（WinUSB）方式')
+        if job.get('confirmed') is not True or not isinstance(job.get('pack_dir'), str):
+            raise ValueError('一键刷机需要用户确认和已导入的刷机包')
+        if (job.get('phase'), job.get('chunk')) not in oneclick.PHASES:
+            raise ValueError('未知的刷机阶段')
     if job['action'] == 'write':
         if job['mode'] != 'usb':
             raise ValueError('写入只支持 USB（WinUSB）方式')
@@ -128,6 +136,9 @@ def run(job, link_factory=None):
         write_payload = firehose_write.chunk_size(step['segments'])
         link = link_factory(job['loader'], job['mode'], job.get('port', ''), log=lambda m: emit('log', message=m),
                             write_payload=write_payload)
+    elif job['action'] == 'flash':
+        link = link_factory(job['loader'], job['mode'], job.get('port', ''), log=lambda m: emit('log', message=m),
+                            write_payload=job['chunk'])
     else:
         link = link_factory(job['loader'], job['mode'], job.get('port', ''), log=lambda m: emit('log', message=m))
     if WATCHDOG is not None:
@@ -140,7 +151,23 @@ def run(job, link_factory=None):
         def progress(label, done, total):
             emit('progress', label=label, done=done, total=total)
 
-        if job['action'] == 'storage':
+        if job['action'] == 'flash':
+            from . import __version__, oneclick
+            if device.get('msm_id') is None:
+                raise ValueError('设备连接前已处于 Firehose 模式。请拔插重新进入 9008；未写入')
+            ep_out, ep_in = link.endpoints()
+            log = lambda m: emit('log', message=m)
+            try:
+                result = oneclick.run_session(job['pack_dir'], job['phase'], link.read, ep_out, ep_in, device, log=log,
+                                              progress=progress, on_disk_sectors=link.set_disk_sectors,
+                                              tool_version=__version__, retry=job.get('retry', False))
+            except oneclick.FlashStopped as err:
+                raise ValueError(str(err)) from None
+            if result['done']:
+                log('全部写入并校验通过，请求设备正常重启（仅一次）')
+                link.reset()
+            emit('result', action='flash', result=result)
+        elif job['action'] == 'storage':
             from . import emmc_life
             emit('result', action='storage', report=emmc_life.from_firehose(link.storage_info()))
         elif job['action'] == 'probe':

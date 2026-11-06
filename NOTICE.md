@@ -22,8 +22,9 @@ GPT 主/备校验规则、Firehose XML 白名单、禁用 edl 写入方法的做
 `tools/recovery/edl_readonly.py`（原为 AGPL-3.0-only，由版权人在本项目中以 GPL-3.0-only 重新发布）。
 严格写入传输规则（明确 ACK 解析、按实际写出字节核对、短写不重试、零长度包）移植自同一项目的
 `tools/recovery/restore_protocol.py`，许可证处理同上。
+分区表生成规则（`usbtool/gpt_plan.py`）移植自同一项目的 `tools/second-board/plan_gpt.py`，许可证处理同上。
 
 ## 不包含的内容
 
-- **高通 Firehose 加载器**（如 `prog_emmc_firehose_8916.mbn`）是高通专有二进制，本工具不分发，需由用户自己提供；
+- **高通 Firehose 加载器**（如 `prog_emmc_firehose_8916.mbn`）是高通专有二进制，不在源码仓库中，也不分发。本机打包时可以内置自己的副本，这样的 exe 只能自用，不能公开分发；
 - 任何设备镜像、备份、设备标识。

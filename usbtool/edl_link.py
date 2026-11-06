@@ -4,7 +4,7 @@ import hashlib
 import sys
 import time
 
-from . import detect, guard
+from . import detect, guard, paths
 from .policy import KNOWN_LOADERS, MSM8916_ID
 
 EDL_REVISION = '1cda1a616748d608667b2d13b73a28d3197ceb45'
@@ -85,6 +85,14 @@ def check_loader(path, allow_unknown):
     if digest not in KNOWN_LOADERS and not allow_unknown:
         raise LinkError(f'加载器 SHA256 {digest} 不在已知名单中；确认来源可信后需在界面上明确勾选才可使用')
     return digest, KNOWN_LOADERS.get(digest, '未知加载器（用户确认使用）')
+
+
+def default_loader():
+    """内置加载器的路径。必须是已知摘要，否则当作没有内置。"""
+    path = paths.bundled_loader()
+    if path is None or loader_digest(path) not in KNOWN_LOADERS:
+        return None
+    return str(path)
 
 
 class EdlLink:

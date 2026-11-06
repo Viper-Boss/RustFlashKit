@@ -5,8 +5,9 @@ import json
 import os
 import sys
 import threading
+import time
 
-from . import backup, detect, dryrun, emmc_life, paths, worker
+from . import backup, detect, dryrun, edl_link, emmc_life, flashpack, oneclick, paths, worker
 
 
 PROBE_TIMEOUT = 300  # 秒；与界面一致。工作进程自身另有看门狗
@@ -47,6 +48,9 @@ def _pump(proc, code):
                     print(f'{p["index"]:>3} {p["name"]:<12} 起始 {p["first_sector"]:>10} 大小 {p["bytes"]:>12}')
                 for w in event['warnings']:
                     print('提示：' + w)
+            elif event['action'] == 'flash':
+                result = event['result']
+                print(f'\n阶段 {result["phase"]} 完成：写入 {result["written"]}，跳过 {result["skipped"]}')
             elif event['action'] == 'storage':
                 print(emmc_life.format_report(event['report']))
                 code = 0 if event['report']['available'] else 1
@@ -59,6 +63,43 @@ def _pump(proc, code):
             print('\n错误：' + event['message'], file=sys.stderr)
     proc.wait()
     return code if proc.returncode == 0 else 1
+
+
+def _wait_for_usb_device(fresh):
+    """等棒子进入 9008（WinUSB）。fresh=True 时要先看到它被拔掉。"""
+    while True:
+        devices, _ = detect.detect()
+        if fresh:
+            fresh = bool(devices)
+        elif len(devices) == 1 and devices[0]['mode'] == 'usb':
+            return
+        elif devices and devices[0]['mode'] != 'usb':
+            print('棒子的驱动不是 WinUSB，请在设备管理器换成 QHSUSB__BULK')
+        time.sleep(1)
+
+
+def _flash(args):
+    try:
+        folder = flashpack.import_pack(args.pack)
+    except flashpack.PackError as err:
+        print(f'错误：{err}', file=sys.stderr)
+        return 1
+    manifest = flashpack.check_imported(folder)
+    loader = folder / manifest['loader']['file'] if manifest.get('loader') else (args.loader or edl_link.default_loader())
+    if not loader:
+        print('错误：刷机包没带加载器，请用 --loader 提供', file=sys.stderr)
+        return 1
+    print(f'刷机包：{manifest["name"]} 版本 {manifest["version"]}')
+    for index, (phase, chunk) in enumerate(oneclick.PHASES):
+        print('请拔掉棒子，等 5 秒，按住按键插回电脑，继续按住 3 秒再松开…')
+        _wait_for_usb_device(fresh=index > 0)
+        job = {'action': 'flash', 'mode': 'usb', 'port': '', 'pack_dir': str(folder), 'phase': phase, 'chunk': chunk,
+               'confirmed': True, 'retry': args.retry, 'reset_after': False, 'loader': os.path.abspath(str(loader)),
+               'allow_unknown_loader': bool(manifest.get('loader'))}
+        if _run_job(job) != 0:
+            return 1
+    print('刷机完成，棒子正在重启。')
+    return 0
 
 
 def selfcheck():
@@ -87,6 +128,7 @@ def selfcheck():
     backend = detect.libusb_backend()
     print(f'edl 已加载，{len(guard.MUTATING_METHODS)} 个写入方法已禁用，program XML 被拦截')
     print('libusb：' + ('可用' if backend is not None else '不可用（只能用 COM 口方式）'))
+    print('内置加载器：' + ('有' if edl_link.default_loader() else '没有'))
     return 0
 
 
@@ -97,7 +139,7 @@ def main(argv):
     sub.add_parser('selfcheck', help='运行环境自检（不访问设备）')
     for name in ('probe', 'backup', 'write'):
         p = sub.add_parser(name, help='按计划写入一步（只支持 USB 方式；需要 --confirm 步骤摘要）' if name == 'write' else None)
-        p.add_argument('--loader', required=True)
+        p.add_argument('--loader', help='默认用 exe 内置的加载器')
         p.add_argument('--allow-unknown-loader', action='store_true')
         p.add_argument('--mode', choices=('serial', 'usb'))
         p.add_argument('--port', default='')
@@ -117,9 +159,27 @@ def main(argv):
     life.add_argument('--identity', help='维护 SSH 私钥文件')
     life.add_argument('--known-hosts', help='含设备主机公钥的 known_hosts（必须提供，不做首次自动信任）')
     life.add_argument('--loader', help='9008 状态的加载器；是否读得到取决于加载器')
+    life.add_argument('--edl', action='store_true', help='9008 状态，用内置加载器')
     life.add_argument('--allow-unknown-loader', action='store_true')
     life.add_argument('--mode', choices=('serial', 'usb'))
     life.add_argument('--port', default='')
+    k = sub.add_parser('pack-keygen', help='生成刷机包签名密钥（不覆盖已有文件）')
+    k.add_argument('--key', required=True)
+    c = sub.add_parser('pack-create', help='生成并签名刷机包')
+    c.add_argument('--output', required=True)
+    c.add_argument('--name', required=True)
+    c.add_argument('--version', required=True)
+    c.add_argument('--key', required=True)
+    for image in flashpack.IMAGES:
+        c.add_argument(f'--{image.lower()}', required=True, metavar='镜像文件')
+    c.add_argument('--with-loader', help='把加载器打进包里（这样的包只能自用，不能公开分发）')
+    im = sub.add_parser('pack-import', help='校验并导入刷机包')
+    im.add_argument('pack')
+    fl = sub.add_parser('flash', help='一键刷机（只支持 USB 方式）')
+    fl.add_argument('--pack', required=True, help='.rshpack 文件')
+    fl.add_argument('--loader', help='刷机包没带加载器时必须提供')
+    fl.add_argument('--i-understand-this-erases-android', action='store_true', required=True)
+    fl.add_argument('--retry', action='store_true', help='重试上次未成功的那一步')
     w = sub.add_parser('write-dryrun', help='离线核对写入计划（不打开 USB）')
     w.add_argument('--plan', required=True)
     w.add_argument('--backup-dir', required=True, help='含当前设备 gpt-primary.bin / gpt-backup.bin 的备份目录')
@@ -142,7 +202,28 @@ def main(argv):
         for n in notes:
             print('提示：' + n)
         return 0 if devices else 1
-    if args.command == 'emmc-life' and not args.loader:
+    if args.command == 'pack-keygen':
+        print('公钥：' + flashpack.generate_key(args.key))
+        return 0
+    if args.command == 'pack-create':
+        images = {image: getattr(args, image.lower()) for image in flashpack.IMAGES}
+        try:
+            flashpack.create_pack(args.output, args.name, args.version, images, args.key, args.with_loader)
+        except (flashpack.PackError, OSError) as err:
+            print(f'错误：{err}', file=sys.stderr)
+            return 1
+        print(f'已生成：{args.output}')
+        return 0
+    if args.command == 'pack-import':
+        try:
+            print(f'已导入：{flashpack.import_pack(args.pack)}')
+        except flashpack.PackError as err:
+            print(f'错误：{err}', file=sys.stderr)
+            return 1
+        return 0
+    if args.command == 'flash':
+        return _flash(args)
+    if args.command == 'emmc-life' and not args.loader and not args.edl:
         try:
             report = emmc_life.read_over_ssh(args.ssh, args.identity, args.known_hosts)
         except emmc_life.LifeError as err:
@@ -175,7 +256,11 @@ def main(argv):
                 print(f'需要恰好一个 9008 设备，现在找到 {len(devices)} 个', file=sys.stderr)
                 return 1
             mode, port = devices[0]['mode'], devices[0]['port']
-        job = {'action': 'storage' if args.command == 'emmc-life' else args.command, 'loader': os.path.abspath(args.loader), 'allow_unknown_loader': args.allow_unknown_loader,
+        loader = args.loader or edl_link.default_loader()
+        if not loader:
+            print('错误：这个版本没有内置加载器，请用 --loader 提供', file=sys.stderr)
+            return 1
+        job = {'action': 'storage' if args.command == 'emmc-life' else args.command, 'loader': os.path.abspath(loader), 'allow_unknown_loader': args.allow_unknown_loader,
                'mode': mode, 'port': port, 'reset_after': getattr(args, 'reset_after', False)}
         if args.command == 'backup':
             job.update(partitions=args.partition, reread=not args.no_reread, vote=args.vote, keep_reads=args.keep_reads,

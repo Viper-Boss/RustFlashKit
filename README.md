@@ -11,13 +11,14 @@
 | 按分区或全盘备份到本地，长度 + SHA256 + 二次回读校验，离线复核；回读不一致时定位扇区，可选第三遍多数表决另存“尽力而为”镜像（标为未验证，演练不会采用） | 已实现；实机上正确识别出一块读不稳的二手 eMMC 并拒绝备份；在稳定设备上完整通过尚未实测 |
 | 读取 eMMC 寿命（只读）：开机状态经维护 SSH 读 sysfs；9008 状态经 getstorageinfo，能否读到取决于加载器 | 已实现，模拟测试通过；**未经实机验证** |
 | 刷写演练：只核对，不连接设备、不写入 | 已实现，测试通过 |
+| 一键刷机：导入签名刷机包，自动预检、备份、分阶段写入 | 已实现，模拟设备测试通过；分区表、aboot、boot 的写入方式真机验证过，**完整一键流程和 NSHSTATE/rootfs 未经实机验证，刷机包还没有生成** |
 | 受限写入（按计划文件一次一步，只限命令行、只限 USB 方式） | 已实现，模拟设备测试通过；**从未对真实设备写入过**，每次真实写入都需要用户单独批准 |
 | 经 USB 重连 Wi-Fi：工具自有密钥配对/登录、读取网络列表、试连接/确认/取消（45 秒自动回滚） | 工具端已实现，模拟测试通过；**需要设备端先改 3 处**（`docs/DEVICE-SIDE-WIFI-AUTH.md`），未经实机验证 |
 | 导出短信和通话记录 | **未实现**，见 `docs/PLAN.md` |
 
 ## 使用
 
-1. 准备 Firehose 加载器 `prog_emmc_firehose_8916.mbn`（高通专有文件，本工具不提供）。RustSimHub 用过的那份 SHA256 为 `959439aa5864685999b713c3ed12ad5fa408149648b670a9a9ef77bcc9dcab14`，工具会识别它；其他加载器在使用前会再次要你确认。
+1. Firehose 加载器 `prog_emmc_firehose_8916.mbn` 是高通专有文件，源码仓库不包含。如果本机有 `..\RustSimHub\.private\prog_emmc_firehose_8916.mbn` 且摘要相符，`build.ps1` 会把它打进 exe，运行时不用再选。**这样打出来的 exe 只能自用，不能公开发布或发给别人。**没有内置时需要自己选择。RustSimHub 用过的那份 SHA256 为 `959439aa5864685999b713c3ed12ad5fa408149648b670a9a9ef77bcc9dcab14`，工具会识别它；其他加载器在使用前会再次要你确认。
 2. 让棒子进入 9008：关机后按住按键插入 USB（或短接测试点）。设备管理器里应出现
    “Qualcomm HS-USB QDLoader 9008 (COMx)”；如果显示为未知设备，可以安装高通驱动，或用 Zadig 装 WinUSB。
 3. 双击 `RustSimHub-UsbTool.exe`：
@@ -47,6 +48,24 @@ RustSimHub-UsbTool-cli.exe dryrun --backup-dir .local\backups\20261029-120000 --
 3. 首次授权：在设备网页上（主人登录）打开配对窗口 → 回到工具点“申请授权” → 在网页上核对申请编号和工具公钥后批准。工具只申请 `status.read` 和 `network.manage` 两项权限。
 4. 以后每次只需“登录” → 读取网络列表或手动输入 → “试连接” → 状态变成“已连上”后点“确认保存”。45 秒内不确认，设备会自动恢复原网络。结果不明时只能“重新查询”（用同一个编号），不会自动重做。
 5. 工具私钥用 Windows DPAPI 加密保存在 `.local/edge/client.key`，只有当前 Windows 账号能解开；在设备网页上撤销授权即可让它失效。
+
+## 一键刷机
+
+把原厂 UFI003 刷成 RustSimHub 系统。在“一键刷机”页：
+
+1. 导入刷机包（`.rshpack`）。工具校验 Ed25519 签名和每个镜像的摘要，签名不对就拒绝，没有跳过校验的选项。
+2. 点“开始刷机”，输入“确认刷机”。这次确认覆盖下面整个流程。
+3. 按提示拔插进 9008，工具自动备份 NV 和启动链（每个分区读两遍）并检查芯片，然后写新分区表。
+4. 再按提示拔插一次（加载器只认连接时的一次配置，块大小也在那时定下），工具自动写 aboot、boot、NSHSTATE、rootfs。已经写对的会跳过，每一步都回读三遍并比对保护区。全部通过后请求棒子正常重启。
+
+以下情况会在写入前拒绝：分区表不是支持的原厂或 RustSimHub 布局、芯片读不稳、tz 与 tzbak 不一致、原设备布局。基带/NV/校准分区不会被写，tz、sbl1、rpm、hyp 也不写。中途失败不会自动重试；重新开始时已写好的内容自动跳过，上次失败的那一步要你再确认一次才重试。
+
+刷机包由发布方生成（镜像长度必须是 16 KiB 的整数倍，私钥不进 git）：
+
+```
+RustSimHub-UsbTool-cli.exe pack-create --output x.rshpack --name RustSimHub --version 1.0 --key <私钥> --aboot a.img --boot b.img --nshstate s.img --rootfs r.img
+RustSimHub-UsbTool-cli.exe flash --pack x.rshpack --i-understand-this-erases-android
+```
 
 ## 读取 eMMC 寿命
 

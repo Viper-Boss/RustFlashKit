@@ -40,6 +40,7 @@ def apply(root):
     style.configure('TLabel', background=BG, foreground=TEXT)
     style.configure('Muted.TLabel', foreground=MUTED)
     style.configure('Danger.TLabel', foreground=DANGER)
+    style.configure('Title.TLabel', foreground=ACCENT, font=(family, 11, 'bold'))
     style.configure('TLabelframe', background=BG, bordercolor=BORDER, relief='solid', borderwidth=1)
     style.configure('TLabelframe.Label', background=BG, foreground=TEXT, font=(family, 10, 'bold'))
 

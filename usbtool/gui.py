@@ -8,8 +8,9 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from . import __version__, backup, detect, dryrun, emmc_life, header, paths, policy, theme, worker
+from .gui_flash import FlashTab
 from .gui_wifi import WifiTab
-from .edl_link import loader_digest
+from .edl_link import default_loader, loader_digest
 
 PROBE_TIMEOUT = 300  # 秒；读分区表应在几十秒内完成
 
@@ -36,7 +37,10 @@ class App:
         ttk.Label(top, text='Firehose 加载器：').grid(row=0, column=0, sticky='w', padx=4, pady=3)
         ttk.Entry(top, textvariable=self.loader).grid(row=0, column=1, sticky='ew', padx=4)
         ttk.Button(top, text='选择…', command=self.pick_loader).grid(row=0, column=2, padx=4)
-        self.loader_label = ttk.Label(top, text='未选择（需要你自己提供 prog_emmc_firehose_8916.mbn）')
+        builtin = default_loader()
+        self.loader.set(builtin or '')
+        self.loader_label = ttk.Label(top, text='已内置，无需选择（也可以手动换一个）' if builtin
+                                      else '未选择（需要你自己提供 prog_emmc_firehose_8916.mbn）')
         self.loader_label.grid(row=1, column=1, sticky='w', padx=4)
         ttk.Button(top, text='检测 9008 设备', command=self.detect, style='Accent.TButton').grid(row=2, column=0, padx=4, pady=3, sticky='w')
         self.device_var = tk.StringVar()
@@ -49,6 +53,7 @@ class App:
 
         tabs = ttk.Notebook(root)
         tabs.pack(fill='both', expand=True, padx=12)
+        self.flash_tab = FlashTab(tabs, self)
         self.build_backup_tab(tabs)
         self.build_dryrun_tab(tabs)
         WifiTab(tabs, self)
@@ -310,6 +315,8 @@ class App:
             self.append_log(f'芯片：{chip}  HWID {self.device.get("hwid")}')
             if self.device.get('note'):
                 self.append_log('提示：' + self.device['note'])
+        elif kind == 'result' and event['action'] == 'flash':
+            self.flash_tab.on_result(event)
         elif kind == 'result' and event['action'] == 'storage':
             self.show_life(emmc_life.format_report(event['report']))
             self.banner.say('idle', '芯片寿命查询结束')
@@ -324,6 +331,9 @@ class App:
         elif kind == 'error':
             self.append_log('错误：' + event['message'])
             self.banner.say('worried')
+            if self.flash_tab.phase_index is not None:
+                self.flash_tab.on_error(event['message'])
+                return
             messagebox.showerror('操作失败', event['message'] + '\n\n没有自动重试，也没有自动重启设备。')
         elif kind == 'exit' and event['proc'] is self.proc:
             if self.life_text.get('1.0', 'end').startswith('正在连接'):
@@ -333,6 +343,7 @@ class App:
             self.probe_button.config(state='normal')
             self.backup_button.config(state='normal' if self.layout else 'disabled')
             self.status.config(text=f'工作进程结束（退出码 {event["code"]}）')
+            self.flash_tab.on_exit()
 
     def show_layout(self, layout, warnings):
         self.layout = layout
