@@ -1,4 +1,12 @@
-# 核心功能仅使用 Python 标准库（tkinter 随官方 Python 安装附带）。
-# 蓝牙（BLE）配置功能为可选依赖，需要时安装：
-pip install bleak
-# 打包 exe 可选：pyinstaller（见 build_exe.bat）
+# bkerler/edl 固定到 RustSimHub 审查过的提交（GPLv3），只装本工具用到的依赖
+edlclient @ https://github.com/bkerler/edl/archive/1cda1a616748d608667b2d13b73a28d3197ceb45.tar.gz#sha256=00c50cf6eda58d1e2c47092f699f0eec6ca4e6f1e9b915db9e9a68db038286c5
+pyusb==1.3.1
+pyserial==3.5
+docopt==0.6.2
+lxml==6.0.2
+pycryptodome==3.23.0
+pycryptodomex==3.23.0
+colorama==0.4.6
+cryptography==46.0.3
+pytest==9.2.0
+pyinstaller==6.22.3

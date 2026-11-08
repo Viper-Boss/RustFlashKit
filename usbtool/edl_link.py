@@ -1,0 +1,201 @@
+# SPDX-License-Identifier: GPL-3.0-only
+"""通过 bkerler/edl（GPLv3，固定提交 1cda1a6）连接 9008 设备。只在工作子进程里使用。"""
+import hashlib
+import sys
+import time
+
+from . import detect, guard, paths
+from .policy import KNOWN_LOADERS, MSM8916_ID
+
+EDL_REVISION = '1cda1a616748d608667b2d13b73a28d3197ceb45'
+
+
+class LinkError(RuntimeError):
+    pass
+
+
+# edl 把 cdc.timeout 设成 1500（USB 后端按毫秒），pyserial 却按秒理解，串口模式一次读可能卡 25 分钟。
+# 这里给串口读取加上限；停滞更久的情况由工作进程看门狗兜底。
+CONNECT_READ_CAP = 5.0
+DATA_READ_CAP = 30.0
+SERIAL_READ_CAP = [CONNECT_READ_CAP]
+MISSED_HELLO = ('EDL 连接失败（没有收到可识别的 Sahara Hello）。请看日志判断：'
+                '若是刚进 9008 就失败，可换用 WinUSB 驱动后选 USB 方式对比；若端口已开很久，可拔插重新进入 9008；'
+                '也可能是加载器与设备不匹配。未写入设备。')
+# edl 串口 read() 在 XML 模式下把长度截成“当前已到达的字节数”，端口刚打开、Hello 还没进缓冲区时就读 0 字节，
+# 随即判定为 error。这里在缓冲区为空时最多等这么久，再交给原实现。
+DATA_WAIT = 3.0
+POLL = 0.02
+
+
+def capped(timeout):
+    cap = SERIAL_READ_CAP[0]
+    return cap if timeout is None or timeout > cap else timeout
+
+
+def wait_for_data(device, limit, clock=time.monotonic, sleep=time.sleep):
+    deadline = clock() + limit
+    while device.in_waiting == 0 and clock() < deadline:
+        sleep(POLL)
+
+
+def cap_serial_reads():
+    from edlclient.Library.Connection.seriallib import serial_class
+    if getattr(serial_class.usbread, '_usbtool_capped', False):
+        return
+    original_usbread, original_read = serial_class.usbread, serial_class.read
+
+    def usbread(self, resplen=None, timeout=0):
+        return original_usbread(self, resplen, capped(timeout))
+
+    def read(self, length=None, timeout=-1):
+        if self.xmlread and length:
+            wait_for_data(self.device, DATA_WAIT)
+        return original_read(self, length, timeout)
+
+    usbread._usbtool_capped = True
+    serial_class.usbread = usbread
+    serial_class.read = read
+
+
+def use_usb_backend(backend):
+    """edl 在 Windows 上把 usb_class.backend 设为 None，pyusb 找不到 libusb-1.0 时会退回 libusb0，
+    而 libusb0 看不到 WinUSB 驱动下的 9008。这里固定使用与 detect 相同、显式加载的 libusb-1.0 后端。"""
+    from edlclient.Library.Connection.usblib import usb_class
+    original = getattr(usb_class.__init__, '_usbtool_original', usb_class.__init__)
+
+    def __init__(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        self.backend = backend
+
+    __init__._usbtool_original = original
+    usb_class.__init__ = __init__
+
+
+def loader_digest(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as stream:
+        for block in iter(lambda: stream.read(1 << 20), b''):
+            h.update(block)
+    return h.hexdigest()
+
+
+def check_loader(path, allow_unknown):
+    digest = loader_digest(path)
+    if digest not in KNOWN_LOADERS and not allow_unknown:
+        raise LinkError(f'加载器 SHA256 {digest} 不在已知名单中；确认来源可信后需在界面上明确勾选才可使用')
+    return digest, KNOWN_LOADERS.get(digest, '未知加载器（用户确认使用）')
+
+
+def default_loader():
+    """内置加载器的路径。必须是已知摘要，否则当作没有内置。"""
+    path = paths.bundled_loader()
+    if path is None or loader_digest(path) not in KNOWN_LOADERS:
+        return None
+    return str(path)
+
+
+class EdlLink:
+    """一次 EDL 会话：Sahara 上传加载器 -> Firehose。所有写方法都被 guard 禁用。"""
+
+    def __init__(self, loader, mode, port, log=print, write_payload=None):
+        """write_payload 不为空时是受限写入会话：连接时那一次 configure 就是 SkipWrite=0、块大小为该值。
+        edl 自身的写入方法仍全部禁用；实际写入只走 firehose_write。"""
+        if write_payload is not None and mode != 'usb':
+            raise LinkError('写入只支持 USB（WinUSB）方式')
+        self.policy = guard.ReadOnlyPolicy(write_payload)
+        self.write_payload = write_payload
+        self.log = log
+        old_argv = sys.argv
+        try:
+            # edl.py 在导入时用 docopt 解析 sys.argv，给它一个固定的只读命令。
+            sys.argv = ['edl.py', 'printgpt', '--memory=emmc']
+            import edlclient.edl as edl_module
+            from edlclient.Library.firehose import firehose
+        finally:
+            sys.argv = old_argv
+        guard.install(firehose, self.policy)
+        cap_serial_reads()
+        args = dict(edl_module.args)
+        args.update({'--loader': str(loader), '--memory': 'emmc', '--skipwrite': write_payload is None,
+                     '--maxpayload': str(write_payload or 32768), '--sectorsize': '512', '--vid': '0x05c6',
+                     '--pid': '0x9008', 'printgpt': False})
+        if mode == 'serial':
+            args.update({'--serial': True, '--portname': '\\\\.\\' + port if not port.startswith('\\') else port})
+        elif mode == 'usb':
+            backend = detect.libusb_backend()
+            if backend is None:
+                raise LinkError('无法加载 libusb-1.0，USB（WinUSB）方式不可用')
+            use_usb_backend(backend)
+            log('USB 方式：使用 edl 自带的 libusb-1.0（WinUSB 驱动）')
+        else:
+            raise LinkError(f'未知连接方式 {mode}')
+        self.client = edl_module.main(args)
+        SERIAL_READ_CAP[0] = CONNECT_READ_CAP
+        log(f'打开 {port if mode == "serial" else "USB"}，等待 Sahara Hello 并上传加载器…')
+        if self.client.run() != 0 or self.client.fh is None:
+            raise LinkError(MISSED_HELLO)
+        SERIAL_READ_CAP[0] = DATA_READ_CAP
+        log('Firehose 已就绪')
+        fh = self.client.fh.firehose
+        if fh.cfg.MemoryName.lower() != 'emmc':
+            raise LinkError('设备存储类型不是 eMMC')
+        if write_payload is not None:
+            if bool(fh.cfg.SkipWrite) or int(fh.cfg.MaxPayloadSizeToTargetInBytes) != write_payload:
+                raise LinkError(f'加载器接受的写入配置与预期不同（SkipWrite={fh.cfg.SkipWrite}，'
+                                f'块大小 {fh.cfg.MaxPayloadSizeToTargetInBytes}，预期 {write_payload}），未写入')
+            log(f'写入会话：连接时已配置 SkipWrite=0、块大小 {write_payload}')
+        self.fh = fh
+
+    def device_info(self):
+        sahara = self.client.sahara
+        msm_id = getattr(sahara, 'msm_id', None)
+        info = {'hwid': getattr(sahara, 'hwidstr', None), 'msm_id': None if msm_id is None else f'0x{msm_id:06x}',
+                'serial': None if getattr(sahara, 'serial', None) is None else str(sahara.serial),
+                'chip_ok': msm_id == MSM8916_ID if msm_id is not None else None}
+        pkhash = getattr(sahara, 'pkhash', None)
+        info['pk_hash'] = pkhash if isinstance(pkhash, str) else (pkhash.hex() if isinstance(pkhash, (bytes, bytearray)) else None)
+        if msm_id is None:
+            info['note'] = ('设备已处于 Firehose 模式（之前连接过），本次没有经过 Sahara，读不到芯片信息和 PK_HASH，'
+                            '芯片型号未核对；需要拔插重新进入 9008 才能读到')
+        if msm_id is not None and msm_id != MSM8916_ID:
+            raise LinkError(f'芯片 MSM_ID {info["msm_id"]} 不是 MSM8916，停止')
+        return info
+
+    def storage_info(self):
+        """只读：Firehose getstorageinfo。加载器不支持或被护栏拒绝时返回 None。"""
+        try:
+            return self.fh.cmd_getstorageinfo()
+        except guard.RefusedOperation as err:
+            self.log(f'存储查询被只读护栏拒绝：{err}')
+            return None
+
+    def endpoints(self):
+        """写入用的原始 USB 端点。串口方式不支持写入。"""
+        cdc = self.client.cdc
+        if getattr(cdc, 'is_serial', True) or getattr(cdc, 'EP_OUT', None) is None or getattr(cdc, 'EP_IN', None) is None:
+            raise LinkError('写入只支持 USB（WinUSB）方式')
+        return cdc.EP_OUT, cdc.EP_IN
+
+    def set_disk_sectors(self, sectors):
+        self.policy.disk_sectors = sectors
+
+    def read(self, start, count):
+        rsp = self.fh.cmd_read_buffer(0, start, count, display=False)
+        data = getattr(rsp, 'data', None)
+        if getattr(rsp, 'resp', False) is not True or data is None or len(data) != count * 512:
+            raise LinkError(f'读取扇区 {start}+{count} 失败')
+        return bytes(data)
+
+    def reset(self):
+        self.policy.allow_reset = True
+        try:
+            ok = self.fh.cmd_reset('reset')
+        finally:
+            self.policy.allow_reset = False
+        if ok is not True:
+            raise LinkError('没有收到重启确认，请检查设备状态，不要盲目重试')
+
+    def close(self):
+        if self.client is not None and self.client.cdc is not None:
+            self.client.cdc.close()

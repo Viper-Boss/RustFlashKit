@@ -1,282 +1,137 @@
-# RustFlashKit
+# RustSimHub-UsbTool
 
-<div align="center">
+> 本仓库原名 RustFlashKit：早期版本走 adb/fastboot 路线，MIT 许可证，最后一版 v0.5.0 是提交 `6f6e8ae`，需要时可以从 git 历史取回。现在的代码是 RustSimHub USB 工具（9008/Firehose），按 GPL-3.0-only 发布。
 
-**MSM8916（骁龙 410 / UFI 棒子）Windows 刷机与模块配置工具**
+给 UFI003（高通 MSM8916）4G 随身 WiFi 棒子用的 Windows USB 调试工具，单文件 exe，带图形界面。
 
-模块化刷写 · 固件导出备份 · 刷前自动备份 · 多设备选择 · 蓝牙（BLE）配置（实验） · 可打包单文件 exe
+**当前版本 0.1.0：9008 部分只有只读和演练，没有写入设备分区的功能。Wi-Fi 重连通过设备自己的接口完成（设备端还需要配合改动，见下文）。**
 
-[![CI](https://github.com/Viper-Boss/RustFlashKit/actions/workflows/ci.yml/badge.svg)](https://github.com/Viper-Boss/RustFlashKit/actions/workflows/ci.yml)
-
-![main](docs/screenshots/main-window.png)
-
-</div>
-
----
-
-## 目录
-
-- [简介](#简介)
-- [界面导览](#界面导览)
-- [功能特性](#功能特性)
-- [环境要求](#环境要求)
-- [快速开始](#快速开始)
-- [如何进入 Bootloader 模式](#如何进入-bootloader-模式)
-- [配置档案（Profile）](#配置档案profile)
-- [固件导出与备份](#固件导出与备份)
-- [蓝牙（BLE）配置（实验性）](#蓝牙ble配置实验性)
-- [安全机制](#安全机制)
-- [常见问题](#常见问题-faq)
-- [打包为 exe](#打包为-exe)
-- [开发与测试](#开发与测试)
-- [项目结构](#项目结构)
-- [风险与免责声明](#风险与免责声明)
-
-## 简介
-
-RustFlashKit 是一个运行在 **Windows** 上的图形化刷机工具，面向 MSM8916（骁龙 410）平台的 USB 棒子（UFI/dongle），例如 `UFI003_MB_V02`。
-
-它把"刷哪些分区、用什么镜像"抽象成可编辑的**模块配置**：一行 = 一个模块（分区 + 镜像 + 选项），勾选决定是否刷写。执行前生成完整命令序列供逐条核对，配合多级安全策略，尽量把误刷挡在按下回车之前。
-
-本项目参考了 [Viper-Boss/RustSimHub](https://github.com/Viper-Boss/RustSimHub) 的实机信息（**只读参考，两项目相互独立**）：RustSimHub 在 UFI003 上实测使用 `boot` / `rootfs` / `NSHSTATE` 分区，其官方尚未发布通用刷机包——因此本工具是**通用刷写前端，镜像文件由使用者自行提供**（例如你的 RustSimHub 构建产物）。
-
-> 截图在 Linux 测试环境生成，Windows 下的字体与按钮样式会略有差异。
-
-## 界面导览
-
-### 主窗口
-
-![main](docs/screenshots/main-window.png)
-
-- **深色顶栏**：应用标题 + 右侧实时设备状态徽章（绿 = Bootloader 模式、蓝 = 系统模式、红 = 工具缺失）
-- **左侧·设备与选项**：设备徽章与详情、**设备下拉框**（多设备时指定目标，所有命令显式带序列号）；平台工具就绪状态（绿 ✓）；刷机选项（含**刷写前自动备份**）；一键「重启到 Bootloader」
-- **中间·模块表格**：每行一个模块——勾选框（点击 ☑/☐ 切换，🔒 表示必需项）、模块名、分区、镜像文件、状态（存在显示大小，缺失标红，引导链分区带 ⚠ 标记）
-- **左下·动作**：进度条 + `① 生成预览`（蓝）→ `② 开始刷机…`（红），执行期间锁定界面并可取消
-- **下方·日志（控制台风）**：实时显示每一条执行的命令与输出，同时写入 `logs/flash-<时间戳>.log`
-
-### 计划预览与确认
-
-![preview](docs/screenshots/plan-preview.png)
-
-执行前必须经过这一步：上方黄色汇总区列出要写哪些分区、跳过了什么、有什么问题；下方深色控制台是**逐条命令序列**。必须勾选风险确认，「确认执行」才可用；若包含引导链分区，还需手动输入「确认引导链」四个字。
-
-### 模块编辑器
-
-![editor](docs/screenshots/module-editor.png)
-
-双击模块行打开：分区名（下拉提示 MSM8916 常见分区）、镜像路径（浏览，自动转相对路径）、SHA256（一键计算）、超时、刷后延时，以及 启用/必需/缺失跳过/允许引导链 四个开关。
-
-## 功能特性
-
-| 特性 | 说明 |
+| 功能 | 状态 |
 |---|---|
-| 模块化刷写 | Profile JSON 定义模块列表，勾选参与刷写，支持增删改/复制/排序 |
-| 计划预览 | 先看完整 `fastboot` 命令序列，dry-run 语义，有问题不允许执行 |
-| 强制确认 | 风险勾选确认；引导链分区额外要求输入「确认引导链」 |
-| 分区安全策略 | EFS/IMEI 分区一律拒绝；引导链分区需显式允许；分区名合法性校验 |
-| SHA256 校验 | 模块可填哈希，刷写前自动比对，不匹配立即中止 |
-| 失败即停 | 任何一步失败不再执行后续步骤；执行中可随时取消 |
-| 设备管理 | adb/fastboot 双通道探测，多设备下拉选择，全链路显式序列号（-s）防刷错设备 |
-| 刷前自动备份 | 刷写前自动把将被覆盖的分区经 adb 导出到 `backups/`（含 SHA256），失败即取消刷写 |
-| 固件导出/备份 | 读取设备分区表，adb 只读导出分区镜像，自动 SHA256，一键生成配置档案 |
-| 蓝牙配置（实验） | BLE 扫描/GATT 枚举诊断 + 模板化配网载荷发送骨架（固件协议定稿后改 JSON 模板即对接） |
-| 会话日志 | 窗口实时日志 + 文件存档，事后可追溯 |
-| 零依赖 | 仅 Python 标准库（tkinter）；PyInstaller 一键打包 |
+| 识别 9008（EDL）设备：高通 QDLoader 驱动（COM 口）或 WinUSB/libusb | 已实现；2026-10-29 实机通过（USB/WinUSB 方式） |
+| 上传 Firehose 加载器、读主/备 GPT 并校验 CRC 和一致性 | 已实现；2026-10-29 实机通过（USB/WinUSB 方式） |
+| 按分区或全盘备份到本地，长度 + SHA256 + 二次回读校验，离线复核；回读不一致时定位扇区，可选第三遍多数表决另存“尽力而为”镜像（标为未验证，演练不会采用） | 已实现；实机上正确识别出一块读不稳的二手 eMMC 并拒绝备份；在稳定设备上完整通过尚未实测 |
+| 读取 eMMC 寿命（只读）：开机状态经维护 SSH 读 sysfs；9008 状态经 getstorageinfo，能否读到取决于加载器 | 已实现，模拟测试通过；**未经实机验证** |
+| 刷写演练：只核对，不连接设备、不写入 | 已实现，测试通过 |
+| 一键刷机：导入签名刷机包，自动预检、备份、分阶段写入 | 已实现，模拟设备测试通过；分区表、aboot、boot 的写入方式真机验证过，**完整一键流程和 NSHSTATE/rootfs 未经实机验证，刷机包还没有生成** |
+| 受限写入（按计划文件一次一步，只限命令行、只限 USB 方式） | 已实现，模拟设备测试通过；**从未对真实设备写入过**，每次真实写入都需要用户单独批准 |
+| 经 USB 重连 Wi-Fi：工具自有密钥配对/登录、读取网络列表、试连接/确认/取消（45 秒自动回滚） | 工具端已实现，模拟测试通过；**需要设备端先改 3 处**（`docs/DEVICE-SIDE-WIFI-AUTH.md`），未经实机验证 |
+| 导出短信和通话记录 | **未实现**，见 `docs/PLAN.md` |
 
-## 环境要求
+## 使用
 
-- Windows 10/11 + [Python 3.9+](https://www.python.org/downloads/windows/)（安装时勾选 *Add python.exe to PATH*）
-- [Android platform-tools](https://developer.android.com/tools/releases/platform-tools)：`adb.exe`、`fastboot.exe`（含 `AdbWinApi.dll`、`AdbWinUsbApi.dll`）
+1. Firehose 加载器 `prog_emmc_firehose_8916.mbn` 是高通专有文件，源码仓库不包含。如果本机有 `..\RustSimHub\.private\prog_emmc_firehose_8916.mbn` 且摘要相符，`build.ps1` 会把它打进 exe，运行时不用再选。**这样打出来的 exe 只能自用，不能公开发布或发给别人。**没有内置时需要自己选择。RustSimHub 用过的那份 SHA256 为 `959439aa5864685999b713c3ed12ad5fa408149648b670a9a9ef77bcc9dcab14`，工具会识别它；其他加载器在使用前会再次要你确认。
+2. 让棒子进入 9008：关机后按住按键插入 USB（或短接测试点）。设备管理器里应出现
+   “Qualcomm HS-USB QDLoader 9008 (COMx)”；如果显示为未知设备，可以安装高通驱动，或用 Zadig 装 WinUSB。
+3. 双击 `RustSimHub-UsbTool.exe`：
+   - 选择加载器 → “检测 9008 设备” → “读取分区表”；
+   - 在列表里选择分区（可多选，可勾选全盘备份）→ “备份所选分区”；
+   - 备份保存在 exe 同目录的 `.local\backups\<时间>\`，内有 `manifest.json`（每个镜像的扇区范围、SHA256、校验状态）和主/备 GPT 原样副本；
+   - “刷写演练”页：选择写前备份目录和镜像，点击“运行演练”。报告保存在 `.local\dryruns\`。
+4. 默认操作结束后**不会**重启设备。如需让它回到正常系统，请勾选“完成后让设备正常重启”，或者拔插 USB。
 
-## 快速开始
+命令行请用控制台版 `RustSimHub-UsbTool-cli.exe`（图形版从命令行运行时看不到输出）。每次任务的完整日志在 exe 同目录 `.local\logs\`。设备进入 9008 后只发一次 Sahara Hello，请进入后尽快读取；连接阶段超过 90 秒、读取停滞超过 120 秒都会自动停止并报告（不写入、不重试）。
 
-```
-1. 解压 platform-tools，把 adb.exe / fastboot.exe / Adb*.dll 放入 tools/ 目录
-2. 双击 run.bat
-3. 文件 → 打开配置… → profiles/ufi003_rustsimhub.json（或新建空白配置）
-4. 双击模块行，把「镜像文件」改为你构建出的实际镜像路径
-5. 插上设备 → 左侧下拉选择目标设备 → 「重启到 Bootloader」
-6. ① 生成预览 → 逐条核对 → ② 开始刷机…
-```
-
-> 默认勾选「刷写前自动备份目标分区」：从系统模式发起刷写时，工具会先把将被覆盖的分区经 adb 导出到 `backups/<序列号>-<时间>/`（含 SHA256），备份成功才重启进入刷写；备份失败则不写设备。设备已在 Bootloader 模式时无法备份，会单独询问是否继续。
-
-## 如何进入 Bootloader 模式
-
-MSM8916 棒子常见方式（按设备状态择一）：
-
-| 设备状态 | 方法 |
-|---|---|
-| 系统能 adb 连接（工具显示蓝色"系统模式"） | 点左侧「重启到 Bootloader」，或在开始刷机时按提示自动重启 |
-| 原 Android 系统还在 | `adb reboot bootloader`；或在关机状态按住设备功能键（如有）插入 USB |
-| 完全无法进系统 | 部分设备需拆壳短接进入 9008（EDL）——本工具不支持 EDL 刷写 |
-
-进入成功后设备面板显示绿色 **Bootloader 模式**。
-
-## 配置档案（Profile）
-
-JSON 格式，随文件所在目录作为镜像相对路径的基准。示例：
-
-```json
-{
-  "schema": 1,
-  "name": "UFI003 · RustSimHub 参考模板",
-  "board": "UFI003_MB_V02 (MSM8916 / 骁龙410)",
-  "modules": [
-    {
-      "id": "boot",
-      "name": "内核 boot",
-      "partition": "boot",
-      "image": "images/boot.img",
-      "enabled": true,
-      "required": false,
-      "description": "Linux 内核镜像",
-      "sha256": "",
-      "allow_missing": false,
-      "allow_bootloader": false,
-      "timeout": 300,
-      "post_delay": 0
-    }
-  ]
-}
-```
-
-字段说明：
-
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `id` | str | 模块唯一标识（小写字母数字、`_`、`-`），创建后不可改 |
-| `name` | str | 显示名称 |
-| `partition` | str | fastboot 分区名；自动校验合法性（防路径/注入字符） |
-| `image` | str | 镜像路径；相对路径基于 Profile 文件所在目录 |
-| `enabled` | bool | 是否参与刷写（界面勾选框） |
-| `required` | bool | 必需模块：界面不可停用/删除 |
-| `allow_missing` | bool | 镜像缺失时跳过并记录，而不是报错中止 |
-| `allow_bootloader` | bool | 允许引导链分区（sbl1/aboot/tz/rpm/hyp…）参与刷写 |
-| `sha256` | str | 刷前校验哈希；留空不校验 |
-| `timeout` | int | 单次 `fastboot flash` 超时秒数（≥10；rootfs 等大镜像建议 ≥600） |
-| `post_delay` | float | 该模块刷完后的等待秒数（0–30，个别设备需要喘息） |
-
-内置模板：`profiles/ufi003_rustsimhub.json`（RustSimHub 实测三分区）、`profiles/msm8916_blank.json`（空白）。
-
-## 固件导出与备份
-
-![export](docs/screenshots/export-dialog.png)
-
-入口：左侧「⬇ 导出固件（备份）…」或 `工具 → 固件导出（备份）…`。导出是**只读**操作，与刷写互斥但本身无风险，是刷机前推荐的自我保护手段。
-
-工作流程：
-
-1. **读取分区表**：设备需处于系统模式（adb 可见）。工具枚举 `/dev/block/bootdevice/by-name/` 下全部分区（名称 + 大小 + 设备节点），自动预选 boot/rootfs/system/recovery/NSHSTATE 等常用分区，可全选或 Ctrl/Shift 自选
-2. **开始导出**：逐个分区 `adb pull` 到输出目录（默认 `exports/`），按分区大小自动放大超时；任一失败即停止，已完成的仍然有效
-3. **自动 SHA256**（默认勾选）：导出完成即计算镜像哈希
-4. **③ 从导出生成配置档案**：一键把本次导出变成可刷写的 Profile（分区名 + 镜像 + SHA256 齐全）并载入主窗口——需要刷回时勾选即可
-
-两点说明：
-
-- **Bootloader (fastboot) 模式没有标准的分区读取命令**，因此导出只在系统模式可用；fastboot 下只能写不能读。
-- 与刷写相反，**备份 EFS/IMEI 分区（modemst1/modemst2 等）是强烈推荐的操作**——刷坏前有一份备份，救得回来。若导出报 Permission denied，说明设备的 adbd 无 root 权限，需先刷入 root adbd 的系统再备份。
-
-## 蓝牙（BLE）配置（实验性）
-
-![ble](docs/screenshots/ble-dialog.png)
-
-入口：左侧「📶 蓝牙配置（实验）…」或 `工具 → 蓝牙（BLE）配置…`。
-
-**先说现状**：RustSimHub 的断网蓝牙配置（BLE 应急配网）在固件端**尚未实现**——`docs/ble/README.md`（2026-10-24）只是任务书：GATT UUID、分帧、加密会话（ECDH/HKDF/AEAD）、恢复公钥均"待实施"，固件仓库连 `crates/ble` 都还不存在；官方计划使用 Web Bluetooth 网页配置器（PWA）而非原生程序。因此在协议定稿前，不存在任何"能对上固件"的蓝牙配网工具，本工具也不假装能做到。
-
-在这个前提下，本窗口提供两件现在就有用、协议落地后立即可用的能力：
-
-1. **BLE 诊断**：扫描附近蓝牙设备（名称/地址/信号），双击连接并枚举 GATT 服务与特征——用于确认棒子的 BLE 广播/HCI/GATT 能力（对应任务书 B0 的板级能力矩阵，目前官方也缺这份证据）
-2. **模板化发送骨架**：服务/特征 UUID 与载荷字段存于 `config/ble-provisioning-template.json`（首次运行自动生成，UUID 默认为全零占位符并禁止发送）。固件协议定稿后，把真实 UUID 填进模板即可发送 Wi-Fi 配网载荷——无需改代码
-
-依赖：`pip install bleak`（可选依赖，未安装时窗口内提示；Windows 走系统自带 WinRT 后端，需要本机蓝牙适配器）。断网场景下蓝牙的作用是把 Wi-Fi 凭据送进棒子完成配网恢复，配置成功后仍然回到 adb/fastboot 管理通道。
-
-## 安全机制
-
-刷错分区的代价差异极大，工具内置三道防线：
-
-1. **校验层**：分区名格式、镜像存在性、重复分区、SHA256——问题进 `plan.errors`，有错误不允许执行。
-2. **确认层**：完整命令序列预览 + 风险勾选；引导链分区（sbl1、aboot、tz、rpm、hyp 及其 bak 槽位）额外要求输入「确认引导链」。
-3. **拒绝层**：EFS/校准分区（`modemst1`、`modemst2`、`fsc`、`fsg`、`ssd`、`persistent`、`devinfo` 等）**无条件拒绝**——刷写会永久丢失 IMEI/网络校准数据，属于不可恢复操作，请永远不要用第三方镜像碰这些分区。
-
-执行期策略：失败即停、可取消、全程留痕。
-
-## 常见问题 FAQ
-
-**Q：左侧显示"未找到 adb / fastboot 工具"**
-A：把 platform-tools 的 `adb.exe`、`fastboot.exe`、`Adb*.dll` 放到程序目录的 `tools/` 下，或 `工具 → 设置 adb/fastboot 路径…` 手动指定。
-
-**Q：显示"未授权（请在设备上允许 USB 调试）"**
-A：设备弹出授权对话框时点允许；仅影响 adb 模式，Bootloader 模式不需要授权。
-
-**Q：Bootloader 模式下 fastboot 仍看不到设备**
-A：多为 Windows 驱动问题。设备管理器里找带感叹号的 "Android"/"QUSB_BULK" 设备，更新驱动为 "Android Bootloader Interface"（可用 platform-tools 自带 `winusb` inf 或第三方驱动工具）。注意：EDL (9008) 模式设备不在本工具支持范围内。
-
-**Q：刷 rootfs 超时失败**
-A：在模块编辑器把超时调大（rootfs 建议 ≥600 秒）；同时换 USB 口/线（优先 USB 2.0 接口、劣质线是大数据量刷写失败的头号原因）。
-
-**Q：我的棒子不是 UFI003，能用吗？**
-A：可以，但要先确认分区表：新建空白配置，按你的设备实际分区添加模块。更省事的办法是先用「固件导出」里的**读取分区表**功能枚举设备真实分区，再决定要备份/刷写哪些。分区名错误轻则失败、重则变砖，请先在 fastboot 下用 `fastboot getvar all` 核对。
-
-**Q：导出固件时报 Permission denied？**
-A：设备的 adbd 没有 root 权限，读不了块设备。这类棒子的原厂/第三方系统通常默认 root adbd；若确实没有，请先刷入带 root adbd 的系统再导出。
-
-**Q：蓝牙配网能直接用吗？**
-A：暂时不能——固件端 BLE 协议还没实现（见「蓝牙（BLE）配置（实验性）」一节）。当前可以扫描和枚举 GATT 做能力探测；等 RustSimHub 发布带 BLE 的固件后，在模板里填入真实 UUID 即可使用发送功能。
-
-**Q：和 RustSimHub 是什么关系？**
-A：相互独立的项目。RustSimHub 是设备端固件（Rust 通信系统），RustFlashKit 是通用刷写/配置前端，参考了其实测分区信息；RustSimHub 官方尚未发布通用刷机包，镜像请自行构建并提供。
-
-## 打包为 exe
-
-双击 `build_exe.bat`（需已安装 Python），产物在 `dist/RustFlashKit/`。分发时把 platform-tools 放进其 `tools/` 子目录即可单目录分发。
-
-也可以直接从 GitHub Releases 下载 CI 构建的 exe：在本地打 tag（如 `v0.5.0`）并推送，CI 会自动构建并挂到 Releases；main 分支的每次推送也会生成 artifact（Actions 页面下载）。
-
-## 开发与测试
-
-```bash
-python -m unittest discover -s tests    # 53 项测试（含假 adb/fastboot 端到端刷机与导出流程）
-python -m rustflashkit                  # 启动 GUI
-```
-
-测试覆盖：Profile 加载/校验/往返、分区安全策略（EFS 拒绝/引导链门槛/非法名）、计划生成（顺序/跳过/错误收集）、设备探测（含多设备枚举）、执行器（成功流程/SHA256 拦截/失败即停/取消/序列号定向）、导出器（分区表解析/单分区导出/批量流/失败中止/取消）、BLE 模板与载荷构建（纯逻辑）。GUI 无自动化测试，仅冒烟截图脚本（`tests/gui_smoke.py`、`make_screenshots.py`，需 Xvfb）。
-
-CI（GitHub Actions）在 Linux/Windows 双平台跑全部测试；Windows 作业用 PyInstaller 打包 exe——main 推送产出 artifact，`v*` tag 自动发布到 Releases。
-
-## 项目结构
+命令行（功能相同）：
 
 ```
-RustFlashKit/
-├── run.bat / build_exe.bat / rustflashkit.spec   # 启动 / PyInstaller 打包
-├── profiles/            # 配置档案（UFI003 参考模板 + 空白模板）
-├── tools/               # 放 adb.exe / fastboot.exe（自取 platform-tools）
-├── docs/screenshots/    # README 截图
-├── rustflashkit/
-│   ├── core/
-│   │   ├── runner.py    # 工具定位 + 子进程执行（参数列表，不经 shell）
-│   │   ├── device.py    # adb/fastboot 设备探测与模式切换
-│   │   ├── modules.py   # 模块/Profile 模型、校验、SHA256
-│   │   ├── plan.py      # 刷机计划生成（dry-run 语义）
-│   │   ├── safety.py    # 分区风险分级与强制校验
-│   │   ├── flasher.py   # 后台线程执行器（失败即停/可取消）
-│   │   ├── exporter.py  # 固件导出：分区表读取 + adb pull 批量备份
-│   │   ├── ble.py       # BLE 扫描/GATT 枚举/模板化配网发送（可选 bleak）
-│   │   └── config.py    # 设置与会话日志
-│   └── gui/
-│       ├── app.py       # 主窗口
-│       ├── dialogs.py   # 模块编辑器 / 计划预览 / 设置
-│       ├── export_dialog.py  # 固件导出（备份）对话框
-│       ├── ble_dialog.py     # 蓝牙（BLE）配置对话框
-│       └── theme.py     # 调色板与主题
-└── tests/               # 单元测试 + 假工具 + GUI 冒烟
+RustSimHub-UsbTool-cli.exe selfcheck
+RustSimHub-UsbTool-cli.exe detect
+RustSimHub-UsbTool-cli.exe probe  --loader prog_emmc_firehose_8916.mbn
+RustSimHub-UsbTool-cli.exe backup --loader prog_emmc_firehose_8916.mbn --partition boot --partition __full_disk__
+RustSimHub-UsbTool-cli.exe verify .local\backups\20261029-120000
+RustSimHub-UsbTool-cli.exe dryrun --backup-dir .local\backups\20261029-120000 --write boot=boot.img
 ```
 
-## 风险与免责声明
+## Wi-Fi 重连（经 USB）
 
-- **刷机有变砖风险**。引导链分区刷错需 9008 工具救砖；EFS 分区刷错丢 IMEI 且**不可恢复**（工具已强制拒绝，但请知悉边界）。
-- 不同棒子分区表可能不同，分区名以你设备 `fastboot getvar all` 实测为准。
-- 拿不准时先只刷 `boot` 验证镜像与链路，再刷 `rootfs`。
-- 镜像来源自行把关：建议填写 `sha256` 字段做刷前校验。
-- 本工具仅供个人设备维护与学习研究使用，使用者对操作后果自行负责。
+1. 用 USB 线连接棒子和电脑。Windows 上会出现一块新网卡（NCM）。在“网络连接”里把它的 IPv4 手动设为 `10.55.0.1`，掩码 `255.255.255.248`，不填网关（需要管理员权限，由你自己操作）。
+2. “Wi-Fi 重连”页 → “连接并核对设备”。首次连接时会显示设备网址、证书指纹和设备公钥，请核对后再信任。之后证书一变，工具就会拒绝连接。
+3. 首次授权：在设备网页上（主人登录）打开配对窗口 → 回到工具点“申请授权” → 在网页上核对申请编号和工具公钥后批准。工具只申请 `status.read` 和 `network.manage` 两项权限。
+4. 以后每次只需“登录” → 读取网络列表或手动输入 → “试连接” → 状态变成“已连上”后点“确认保存”。45 秒内不确认，设备会自动恢复原网络。结果不明时只能“重新查询”（用同一个编号），不会自动重做。
+5. 工具私钥用 Windows DPAPI 加密保存在 `.local/edge/client.key`，只有当前 Windows 账号能解开；在设备网页上撤销授权即可让它失效。
+
+## 识别棒子型号
+
+进入 9008 后点“识别型号”（命令行 `probe`）。UFI003 和 UFI001C 的芯片 ID、PK_HASH、原厂分区表都相同，分不出来；工具读 modem 分区里的出厂固件标签（实测 `UFI003_CT 20211210`、`UFI001CT 20211106`），重读确认后才采信，认不准就显示“未知”。全程只读。刷 RustSimHub 不写 modem，所以刷完也能认。这个标签反映的是基带固件；如果有人换过基带固件，它不代表电路板。
+
+## 一键刷机
+
+把原厂 UFI003 刷成 RustSimHub 系统。在“一键刷机”页：
+
+1. 导入刷机包（`.rshpack`）。工具校验 Ed25519 签名和每个镜像的摘要，签名不对就拒绝，没有跳过校验的选项。
+2. 点“开始刷机”，输入“确认刷机”。这次确认覆盖下面整个流程。
+3. 按提示拔插进 9008，工具自动备份 NV 和启动链（每个分区读两遍）并检查芯片，然后写新分区表。
+4. 再按提示拔插一次（加载器只认连接时的一次配置，块大小也在那时定下），工具自动写 aboot、boot、NSHSTATE、rootfs。已经写对的会跳过，每一步都回读三遍并比对保护区。全部通过后请求棒子正常重启。
+
+以下情况会在写入前拒绝：棒子型号与刷机包不符或无法识别（现在的包只给 UFI003）、磁盘空间不够、分区表不是支持的原厂或 RustSimHub 布局、芯片读不稳、tz 与 tzbak 不一致、原设备布局。基带/NV/校准分区不会被写，tz、sbl1、rpm、hyp 也不写。中途失败不会自动重试；重新开始时已写好的内容自动跳过，上次失败的那一步要你再确认一次才重试。
+
+刷机包由发布方生成（镜像长度必须是 16 KiB 的整数倍，私钥不进 git）：
+
+```
+RustSimHub-UsbTool-cli.exe pack-create --output x.rshpack --name RustSimHub --version 1.0 --key <私钥> --aboot a.img --boot b.img --nshstate s.img --rootfs r.img
+RustSimHub-UsbTool-cli.exe flash --pack x.rshpack --i-understand-this-erases-android
+```
+
+## 读取 eMMC 寿命
+
+寿命和保留块状态存在 eMMC 的 EXT_CSD 里，由芯片自己估算，只分 10% 一档。eMMC 5.0 之前的芯片可能不提供，工具会显示“无法判断”，不会说成正常。
+
+- **开机状态（可靠）**：棒子正常运行 RustSimHub 系统时，经 USB 网络和维护 SSH 执行一条固定的只读命令，读 `/sys/block/mmcblk0/device/` 下的 `life_time`、`pre_eol_info`。只用公钥登录，必须提供 known_hosts 严格核对主机。不读序列号，也没有任意命令入口。需要系统里有 OpenSSH 客户端。
+
+```
+RustSimHub-UsbTool-cli.exe emmc-life --identity <维护私钥> --known-hosts <known_hosts 文件>
+```
+
+- **9008 状态（看加载器）**：标准 Firehose 没有读 EXT_CSD 的命令，只能试 `getstorageinfo`。UFI003 常用的 8916 加载器不支持，工具会如实提示。工具不会为此读写芯片寄存器。
+
+```
+RustSimHub-UsbTool-cli.exe emmc-life --loader <加载器> --mode usb
+```
+
+图形界面在“芯片寿命”页。
+
+## 受限写入（命令行）
+
+用于把读不稳的二手 UFI003 改造成测试机（RustSimHub PR #73）。界面里没有写入功能，只能用命令行，且只支持 USB（WinUSB）方式。
+
+1. 计划文件（JSON，`kind: usbtool-write-plan`）列出每一步：目标（只能是 `tz`、`aboot`、`boot`、`NSHSTATE`、`rootfs`、`gpt`）、写入段（起始扇区、扇区数、载荷文件、SHA256）、写入前设备 GPT 的摘要；GPT 步骤还要给出写入后的新摘要。另有保护区段列表，必须覆盖 modem、fsg、modemst1、modemst2、fsc、sec、persist 中设备上存在的每一个。
+2. 先离线核对（不打开 USB）：`RustSimHub-UsbTool-cli.exe write-dryrun --plan plan.json --backup-dir <含当前 GPT 的备份目录>`。它按顺序核对每一步（GPT 步骤之后改用新表），并给出每一步的**步骤摘要**。
+3. 用户在聊天里核对并批准某一步的步骤摘要后，才执行这一步：`RustSimHub-UsbTool-cli.exe write --loader <加载器> --mode usb --plan plan.json --step tz --confirm <步骤摘要>`。
+
+硬性规则（代码写死，计划文件改不了）：
+- sbl1、rpm、hyp、各备份分区（tzbak、abootbak 等）以及全部基带/NV/校准分区永远不能作为目标；重写 GPT 时，这些分区的 128 字节表项必须原样保留。
+- tz、aboot、GPT 这类启动链写入，只允许在**不是原设备布局**的设备上进行。
+- 设备当前的 GPT 摘要必须等于该步骤绑定的值。写入段必须从目标分区起点开始、不超过分区，且不与任何保护区段重叠。
+- **每次写入前都要拔插、重新进入 9008，然后立即执行。** 写入会话必须是加载器启动后的第一次连接：连接时只发送一次 `configure`（SkipWrite=0，块大小也在这时确定）。2026-11-01 真机上，先发 SkipWrite=1、再发 SkipWrite=0，加载器两次都回 ACK，但数据没有写入。设备已处于 Firehose 模式（之前连接过）时，工具会拒绝写入。
+- 连接时 configure 里的 MaxPayload 取能整除这一步每段长度的块大小（不超过 16384 的 2 的幂，最小 512），保证每一块都是满块。2026-10-30 真机上，GPT 主表按 16384+1024 发送时被加载器 NAK，且没有写入任何数据。`program` 必须先收到 `rawmode="true"` 的明确 ACK 才发数据；每块按实际写出字节核对，并补零长度包；数据发完必须收到 `rawmode="false"` 的明确 ACK。短写、超时、NAK 一律终止，不重发。
+- 写前：保护区读两遍，记下哪些扇区读得稳；目标区的原内容另存为前像。写后：目标区回读三遍，每遍都要等于载荷；保护区再读一遍，逐扇区比较；重新读 GPT 核对摘要。
+- 结果写在 `.local\writes\<时间>\report.json`，状态为下列之一：`verified`、`not_written`（设备回了 ACK，但回读仍是写入前的旧内容）、`written_majority`（每个扇区三次回读中至少两次等于载荷，但有读数在跳；不算通过，每次回读的原始数据另存在报告目录）、`written_unprovable`（有保护扇区本来就读不稳，无法证明它们未变）、`readback_mismatch`、`protected_changed`、`gpt_mismatch`、`write_failed`。
+- 每一步执行前都会在 `.local\write-attempts\` 写一个标记，同一步不能被自动再次执行。不会自动重启设备。
+
+## 安全设计
+
+- **只读护栏**：每条发往设备的 Firehose XML 都要先通过白名单，只允许以下几种：`configure`（必须 SkipWrite=1、eMMC）、`read`（不超出磁盘范围）、`getstorageinfo`、`nop`，以及显式请求时的一次 `power reset`。edl 中 12 个会改写存储或内存的方法（program/erase/patch/poke/rawxml 等）在运行时被替换为直接报错。`selfcheck` 命令会验证这一点。
+- **硬编码禁写名单**：modem、fsg、modemst1/2、fsc、sec、persist、sbl1、rpm、tz、hyp、aboot 等分区（基带/NV/校准/引导链）。只有 boot、rootfs、NSHSTATE 可以作为演练目标，并且会按扇区范围检查是否与其他分区重叠。
+- **演练要求**：目标分区必须在同一个备份目录里有已校验的写前备份，备份必须能通过离线复核，镜像（含 sparse 展开后的大小）不能超过分区大小。会生成计划摘要，供以后真实写入时逐次确认。
+- **失败不重试**：读取失败或超时时，保留 `.partial` 文件和清单，不自动重试，也不自动重启设备。
+- **隐私**：备份、日志、任务文件、设备序列号都只写到 `.local/`，`.gitignore` 已排除。不要把它们提交或发给别人。
+
+## 风险
+
+- 9008 是高通芯片的底层下载模式，加载器直接在设备内存里运行。来源不明的加载器有风险。
+- 本工具不写设备，但进入和退出 9008 的物理操作本身，可能让设备停在下载模式，需要拔插恢复。
+- 只读功能还**没有在实机上验证过**；第一次实机使用请按 RustSimHub 的设备约定，在有人值守、已有恢复手段时进行。
+- 备份可能包含 IMEI、校准数据等设备身份信息，请妥善保管。
+
+## 构建
+
+```
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+powershell -ExecutionPolicy Bypass -File build.ps1   # 先跑测试，再生成 dist\RustSimHub-UsbTool.exe
+```
+
+## 许可证
+
+本程序按 **GPL-3.0-only** 发布（见 `LICENSE`）。它打包并调用了 [bkerler/edl](https://github.com/bkerler/edl)（GPLv3，© B. Kerler，固定在提交 `1cda1a6`），因此整个程序必须以 GPLv3 发布。分发 exe 时必须同时提供源码。只读护栏和 GPT 校验规则移植自 RustSimHub `tools/recovery/edl_readonly.py`。全部第三方组件见 `NOTICE.md`。Firehose 加载器是高通专有文件，不在本项目中分发。
