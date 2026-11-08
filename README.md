@@ -45,7 +45,7 @@ RustSimHub-UsbTool-cli.exe dryrun --backup-dir .local\backups\20261029-120000 --
 
 ## Wi-Fi 重连（经 USB）
 
-1. 用 USB 线连接棒子和电脑。Windows 上会出现一块新网卡（NCM）。在“网络连接”里把它的 IPv4 手动设为 `10.55.0.1`，掩码 `255.255.255.248`，不填网关（需要管理员权限，由你自己操作）。
+1. 用 USB 线连接棒子和电脑。Windows 上会出现一块新网卡（NCM）。用 20261108 及以后的刷机包刷的棒子会自动给它分配 `10.55.0.1`（不给网关和 DNS，电脑不会经棒子上网），不用设置。更早的刷机包需要在“网络连接”里把它的 IPv4 手动设为 `10.55.0.1`，掩码 `255.255.255.248`，不填网关（需要管理员权限，由你自己操作）。
 2. “Wi-Fi 重连”页 → “连接并核对设备”。首次连接时会显示设备网址、证书指纹和设备公钥，请核对后再信任。之后证书一变，工具就会拒绝连接。
 3. 首次授权：在设备网页上（主人登录）打开配对窗口 → 回到工具点“申请授权” → 在网页上核对申请编号和工具公钥后批准。工具只申请 `status.read` 和 `network.manage` 两项权限。
 4. 以后每次只需“登录” → 读取网络列表或手动输入 → “试连接” → 状态变成“已连上”后点“确认保存”。45 秒内不确认，设备会自动恢复原网络。结果不明时只能“重新查询”（用同一个编号），不会自动重做。
@@ -77,7 +77,9 @@ RustSimHub-UsbTool-cli.exe flash --pack x.rshpack --i-understand-this-erases-and
 
 寿命和保留块状态存在 eMMC 的 EXT_CSD 里，由芯片自己估算，只分 10% 一档。eMMC 5.0 之前的芯片可能不提供，工具会显示“无法判断”，不会说成正常。
 
-- **开机状态（可靠）**：棒子正常运行 RustSimHub 系统时，经 USB 网络和维护 SSH 执行一条固定的只读命令，读 `/sys/block/mmcblk0/device/` 下的 `life_time`、`pre_eol_info`。只用公钥登录，必须提供 known_hosts 严格核对主机。不读序列号，也没有任意命令入口。需要系统里有 OpenSSH 客户端。
+- **一键（USB）**：刷好的棒子开机后插上 USB 线，点“一键读取（USB）”（命令行 `emmc-life --usb`）。自动使用 `RustSimHub/.private/maintenance-bootstrap-*/id_ed25519`；按棒子的 USB 序列号分别记住主机公钥，存在 `.local/usb-known_hosts`。第一次连接某根棒子时记下（只在 USB 直连线上发生，结果里会注明），以后公钥变了就拒绝；重刷过的棒子需要删掉对应一行。
+- **原厂棒子（adb，刷机前）**：原厂系统正常开机、开着 adb 时点“原厂棒子（adb）”（命令行 `emmc-life --adb`）。只执行固定的 `cat`：先读 sysfs，原厂老内核没有寿命字段时读 debugfs 里的 EXT_CSD。原厂系统是否开放 adb、有没有 root 和 debugfs **未在真机确认**，读不到时如实说明。
+- **开机状态（手动指定）**：棒子正常运行 RustSimHub 系统时，经 USB 网络和维护 SSH 执行一条固定的只读命令，读 `/sys/block/mmcblk0/device/` 下的 `life_time`、`pre_eol_info`。只用公钥登录，必须提供 known_hosts 严格核对主机。不读序列号，也没有任意命令入口。需要系统里有 OpenSSH 客户端。
 
 ```
 RustSimHub-UsbTool-cli.exe emmc-life --identity <维护私钥> --known-hosts <known_hosts 文件>

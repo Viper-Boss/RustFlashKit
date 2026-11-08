@@ -156,6 +156,8 @@ def main(argv):
             p.add_argument('--step', required=True, help='只执行这一步')
             p.add_argument('--confirm', required=True, help='步骤摘要（write-dryrun 会给出；至少前 16 位）')
     life = sub.add_parser('emmc-life', help='只读取 eMMC 寿命：开机状态用 --identity/--known-hosts，9008 状态用 --loader')
+    life.add_argument('--usb', action='store_true', help='一键：USB 线上开机的 RustSimHub 棒子，自动找维护私钥并按棒子记住主机公钥')
+    life.add_argument('--adb', action='store_true', help='原厂棒子正常开机、开着 adb 时读取')
     life.add_argument('--ssh', default='root@10.55.0.2', help='开机状态的设备地址（默认 root@10.55.0.2）')
     life.add_argument('--identity', help='维护 SSH 私钥文件')
     life.add_argument('--known-hosts', help='含设备主机公钥的 known_hosts（必须提供，不做首次自动信任）')
@@ -225,8 +227,14 @@ def main(argv):
     if args.command == 'flash':
         return _flash(args)
     if args.command == 'emmc-life' and not args.loader and not args.edl:
+        from . import life_usb
         try:
-            report = emmc_life.read_over_ssh(args.ssh, args.identity, args.known_hosts)
+            if args.usb:
+                report = life_usb.read_over_usb(args.identity)
+            elif args.adb:
+                report = life_usb.read_over_adb()
+            else:
+                report = emmc_life.read_over_ssh(args.ssh, args.identity, args.known_hosts)
         except emmc_life.LifeError as err:
             print(f'错误：{err}', file=sys.stderr)
             return 1

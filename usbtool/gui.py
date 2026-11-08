@@ -7,7 +7,7 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from . import __version__, backup, board_id, detect, dryrun, emmc_life, header, paths, policy, theme, worker
+from . import __version__, backup, board_id, detect, dryrun, emmc_life, header, life_usb, paths, policy, theme, worker
 from .gui_flash import FlashTab
 from .gui_wifi import WifiTab
 from .edl_link import default_loader, loader_digest
@@ -135,8 +135,17 @@ class App:
         frame = ttk.Frame(tabs)
         tabs.add(frame, text='芯片寿命')
         ttk.Label(frame, wraplength=880, justify='left', text=(
-            '只读。棒子正常开机时，经 USB 网络和维护 SSH 读取系统里的寿命信息，这是最可靠的方式。'
+            '只读。刷好的棒子：开机后插上 USB 线，点“一键读取（USB）”，自动找维护私钥，每根棒子第一次连接时记下它的主机公钥。'
+            '原厂棒子（刷机前）：正常开机、开着 adb 时点“原厂棒子（adb）”。'
             '9008 下能否读到取决于加载器，UFI003 常用的 8916 加载器不支持。')).pack(anchor='w', padx=6, pady=6)
+        quick = ttk.Frame(frame)
+        quick.pack(fill='x', padx=6, pady=4)
+        self.life_usb_button = ttk.Button(quick, text='一键读取（USB）', command=lambda: self.read_life_quick('usb'),
+                                          style='Accent.TButton')
+        self.life_usb_button.pack(side='left')
+        self.life_adb_button = ttk.Button(quick, text='原厂棒子（adb）', command=lambda: self.read_life_quick('adb'))
+        self.life_adb_button.pack(side='left', padx=6)
+        ttk.Label(frame, text='手动方式（指定地址、私钥和 known_hosts）：', style='Muted.TLabel').pack(anchor='w', padx=6)
         self.life_ssh = tk.StringVar(value='root@10.55.0.2')
         self.life_key = tk.StringVar()
         self.life_hosts = tk.StringVar()
@@ -176,6 +185,22 @@ class App:
             except emmc_life.LifeError as err:
                 text = f'读取失败：{err}'
             self.root.after(0, lambda: (self.show_life(text), self.life_button.config(state='normal')))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def read_life_quick(self, how):
+        buttons = (self.life_usb_button, self.life_adb_button)
+        for button in buttons:
+            button.config(state='disabled')
+        self.show_life('正在读取…')
+
+        def work():
+            try:
+                report = life_usb.read_over_usb() if how == 'usb' else life_usb.read_over_adb()
+                text = emmc_life.format_report(report)
+            except emmc_life.LifeError as err:
+                text = f'读取失败：{err}'
+            self.root.after(0, lambda: (self.show_life(text), [b.config(state='normal') for b in buttons]))
 
         threading.Thread(target=work, daemon=True).start()
 
