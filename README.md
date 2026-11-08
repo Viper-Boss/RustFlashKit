@@ -1,5 +1,7 @@
 # RustSimHub-UsbTool
 
+> 本仓库原名 RustFlashKit：早期版本走 adb/fastboot 路线，MIT 许可证，最后一版 v0.5.0 是提交 `6f6e8ae`，需要时可以从 git 历史取回。现在的代码是 RustSimHub USB 工具（9008/Firehose），按 GPL-3.0-only 发布。
+
 给 UFI003（高通 MSM8916）4G 随身 WiFi 棒子用的 Windows USB 调试工具，单文件 exe，带图形界面。
 
 **当前版本 0.1.0：9008 部分只有只读和演练，没有写入设备分区的功能。Wi-Fi 重连通过设备自己的接口完成（设备端还需要配合改动，见下文）。**
