@@ -24,7 +24,7 @@ class FlashTab:
         frame = ttk.Frame(tabs)
         tabs.add(frame, text='一键刷机')
         ttk.Label(frame, wraplength=880, justify='left', text=(
-            '把原厂 UFI003 刷成 RustSimHub 系统。只需要导入刷机包、点开始，中途按提示拔插一次。'
+            '把原厂 UFI003 或 UFI001C 刷成 RustSimHub 系统。只需要导入刷机包、点开始，中途按提示拔插一次。'
             '工具会先备份并检查芯片，基带/NV/校准分区不会被写。')).pack(anchor='w', padx=6, pady=6)
         bar = ttk.Frame(frame)
         bar.pack(fill='x', padx=6, pady=4)

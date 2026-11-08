@@ -7,6 +7,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from conftest import FakeDisk
 from test_write import FakeTarget
+from test_mbn import make_mbn
 from usbtool import firehose_write, flashpack, gpt, gpt_plan, oneclick, worker, writeplan
 
 DISK = 30000
@@ -348,7 +349,7 @@ def test_default_loader_only_when_known(tmp_path, monkeypatch):
     assert edl_link.default_loader() is None
 
 
-@pytest.mark.parametrize('tag,match', [(b'UFI001CT 20211106\0', 'UFI001C'), (b'XXXXXXXXXXXXXXXXXXX', '未知')])
+@pytest.mark.parametrize('tag,match', [(b'XXXXXXXXXXXXXXXXXXX', '未知'), (b'UFI002XX 20211106\0', '未知')])
 def test_wrong_or_unknown_board_refused_before_any_write(pack_dir, tag, match):
     disk = StockDisk(tag=tag)
     before = bytes(disk.data)
@@ -364,4 +365,37 @@ def test_low_disk_space_refused_before_writing_images(pack_dir, monkeypatch):
     monkeypatch.setattr(oneclick.shutil, 'disk_usage', lambda _p: type('U', (), {'free': 1 << 20}))
     with pytest.raises(oneclick.FlashStopped, match='磁盘空间不够'):
         session(pack_dir, 'images', disk)
+    assert bytes(disk.data) == before
+
+
+def put_partition(disk, name, data):
+    first, last = [(p[1], p[2]) for p in stock_parts() if p[0] == name][0]
+    room = (last - first + 1) * 512
+    assert len(data) <= room
+    disk.data[first * 512:(last + 1) * 512] = data + bytes(room - len(data))
+
+
+def test_ufi001c_uses_the_same_pack(pack_dir):
+    disk = StockDisk(tag=b'UFI001CT 20211106\0')
+    result = session(pack_dir, 'prepare', disk)
+    assert result['board']['family'] == 'UFI001C' and result['written'] == ['gpt']
+
+
+def test_different_tz_and_tzbak_both_intact_continue(pack_dir):
+    disk = StockDisk(tag=b'UFI001CT 20211106\0')
+    put_partition(disk, 'tz', make_mbn(b'build one'))
+    put_partition(disk, 'tzbak', make_mbn(b'build two'))
+    assert session(pack_dir, 'prepare', disk)['written'] == ['gpt']
+
+
+@pytest.mark.parametrize('broken', ['tz', 'tzbak'])
+def test_different_tz_and_tzbak_with_one_damaged_refused(pack_dir, broken):
+    disk = StockDisk()
+    images = {'tz': bytearray(make_mbn(b'build one')), 'tzbak': bytearray(make_mbn(b'build two'))}
+    images[broken][-1] ^= 1
+    for name, data in images.items():
+        put_partition(disk, name, bytes(data))
+    before = bytes(disk.data)
+    with pytest.raises(oneclick.FlashStopped, match=broken + ' 没有通过自身哈希校验'):
+        session(pack_dir, 'prepare', disk)
     assert bytes(disk.data) == before

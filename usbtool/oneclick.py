@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-only
-"""一键刷机：把原厂 UFI003 刷成 RustSimHub。全部写入仍走 write_runner.run_step 的计划校验、三次回读和保护区比对。
+"""一键刷机：把原厂 UFI003 或 UFI001C 刷成 RustSimHub。全部写入仍走 write_runner.run_step 的计划校验、三次回读和保护区比对。
 
 分两个阶段，因为加载器只认连接时那一次 configure（块大小也在那时定下）：
 - prepare（块大小 512）：预检并备份 NV 和启动链；原厂布局时写新分区表。
@@ -11,14 +11,17 @@ import json
 import pathlib
 import shutil
 
-from . import backup, board_id, flashpack, gpt, gpt_plan, paths, write_runner, writeplan
+from . import backup, board_id, flashpack, gpt, gpt_plan, mbn, paths, write_runner, writeplan
 
 PHASES = (('prepare', gpt.SECTOR), ('images', flashpack.BLOCK))
 BACKUP_NAMES = ('sbl1', 'sbl1bak', 'aboot', 'abootbak', 'rpm', 'rpmbak', 'tz', 'tzbak', 'hyp', 'hypbak',
                 'modem', 'modemst1', 'modemst2', 'fsc', 'fsg', 'sec', 'persist')
 
 
-PACK_BOARDS = {'ufi003': 'UFI003'}  # 刷机包清单的 board -> 棒子型号
+# 刷机包清单的 board -> 能刷的棒子型号。UFI001C 用同一个包：RustSimHub 锁定的内核源码（KyonLi 6.12.49）里
+# msm8916-thwc-ufi001c.dts 与 ufi003.dts 的按键、LED、SIM 控制引脚相同，只差 LED 的功能名和默认触发，
+# Wi-Fi 同为 wcn3620。包里的设备树仍是 UFI003 的。UFI001C 尚未在真机上验证。
+PACK_BOARDS = {'ufi003': ('UFI003', 'UFI001C')}
 DISK_MARGIN = 200 << 20
 
 
@@ -72,7 +75,8 @@ def images_plan_file(folder, pack_dir, manifest, layout):
 
 
 def _preflight_backup(folder, read, layout, device, log, progress, on_disk_sectors):
-    """每根棒子只备份一次。读不稳或 tz 与 tzbak 不一致时拒绝刷机：这样的棒子写了也靠不住。"""
+    """每根棒子只备份一次。读不稳时拒绝刷机。tz 与 tzbak 不同（UFI001C 上实测两份是不同构建）时，
+    两份都要通过自身哈希段；任何一份不通过就拒绝：说明 tz 可能已损坏。一键刷机本身不写 tz。"""
     serial = device.get('serial') or 'unknown'
     record = folder / f'backup-{serial}.json'
     if record.exists():
@@ -90,7 +94,12 @@ def _preflight_backup(folder, read, layout, device, log, progress, on_disk_secto
         raise FlashStopped(f'预检未通过，没有写入任何内容：{err}') from None
     sums = {i['name']: i['sha256'] for i in manifest['items']}
     if 'tz' in sums and 'tzbak' in sums and sums['tz'] != sums['tzbak']:
-        raise FlashStopped('预检未通过，没有写入任何内容：tz 与 tzbak 不一致，tz 可能已损坏，这根棒子不支持一键刷机')
+        files = {i['name']: target / i['file'] for i in manifest['items']}
+        broken = [n for n in ('tz', 'tzbak') if not mbn.intact(files[n].read_bytes())]
+        if broken:
+            raise FlashStopped('预检未通过，没有写入任何内容：tz 与 tzbak 不一致，并且 ' + '、'.join(broken)
+                               + ' 没有通过自身哈希校验，可能已损坏，这根棒子不支持一键刷机')
+        log('tz 与 tzbak 内容不同，但两份都通过自身哈希校验，继续（一键刷机不写 tz）')
     record.write_text(json.dumps({'folder': str(target)}, ensure_ascii=False), encoding='utf-8')
     return str(target)
 
@@ -132,8 +141,8 @@ def run_session(pack_dir, phase, read, ep_out, ep_in, device, log=print, progres
     board = board_id.identify(read, layout, progress)
     log('棒子型号：' + board_id.describe(board))
     wanted = PACK_BOARDS[manifest['board']]
-    if board['family'] != wanted:
-        raise FlashStopped(f'这个刷机包是给 {wanted} 的，这根棒子是 {board_id.describe(board)}。没有写入任何内容')
+    if board['family'] not in wanted:
+        raise FlashStopped(f'这个刷机包是给 {"、".join(wanted)} 的，这根棒子是 {board_id.describe(board)}。没有写入任何内容')
     result = {'phase': phase, 'layout_state': state, 'board': board, 'written': [], 'skipped': [], 'reports': []}
     payload = dict(PHASES)[phase]
     if phase == 'prepare':
