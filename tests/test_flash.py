@@ -399,3 +399,26 @@ def test_different_tz_and_tzbak_with_one_damaged_refused(pack_dir, broken):
     with pytest.raises(oneclick.FlashStopped, match=broken + ' 没有通过自身哈希校验'):
         session(pack_dir, 'prepare', disk)
     assert bytes(disk.data) == before
+
+
+def test_default_pack_is_found_next_to_the_tool_and_in_rustsimhub_private(tmp_path, monkeypatch, signing):
+    from usbtool import paths
+    tool = tmp_path / 'RustSimHub-UsbTool' / 'dist'
+    tool.mkdir(parents=True)
+    private = tmp_path / 'RustSimHub' / '.private'
+    private.mkdir(parents=True)
+    monkeypatch.setattr(paths, 'app_dir', lambda: tool)
+    assert flashpack.find_default_pack() is None
+    older = private / 'a.rshpack'
+    older.write_bytes(b'x')
+    newer = tool / 'b.rshpack'
+    newer.write_bytes(b'y')
+    import os
+    os.utime(older, (1, 1))
+    assert flashpack.find_default_pack() == newer
+    (private / 'not-a-pack.zip').write_bytes(b'z')
+    newer.unlink()
+    assert flashpack.find_default_pack() == older
+    # 找到的文件照样要验签：随便一个文件不能被导入
+    with pytest.raises(flashpack.PackError):
+        flashpack.import_pack(older)

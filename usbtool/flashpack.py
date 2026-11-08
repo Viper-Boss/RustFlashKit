@@ -120,6 +120,26 @@ def _verify_signature(raw, signature, trusted=None):
     raise PackError('刷机包签名无效，或不是受信任的密钥签的，已拒绝')
 
 
+def default_pack_dirs():
+    """自动查找刷机包的位置：程序目录，以及往上三层内的 RustSimHub/.private（本机发布方的私有目录）。"""
+    base = paths.app_dir()
+    found = [base]
+    for parent in [base, *list(base.parents)[:3]]:
+        found.append(parent / 'RustSimHub' / '.private')
+    return found
+
+
+def find_default_pack():
+    """最新的 .rshpack 路径，没有则 None。只是找文件；用之前照样要 import_pack 校验签名和摘要。"""
+    packs = []
+    for folder in default_pack_dirs():
+        try:
+            packs += [p for p in folder.glob('*.rshpack') if p.is_file()]
+        except OSError:
+            continue
+    return max(packs, key=lambda p: p.stat().st_mtime) if packs else None
+
+
 def packs_dir():
     path = paths.local_dir() / 'packs'
     path.mkdir(parents=True, exist_ok=True)

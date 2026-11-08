@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """“一键刷机”页：导入刷机包 -> 确认一次 -> 自动预检、备份、写入；中途提示拔插一次。"""
+import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -54,7 +55,13 @@ class FlashTab:
             manifest = flashpack.check_imported(folder)
             if manifest:
                 self.use_pack(folder, manifest)
-                return
+                break
+        # 默认位置有刷机包就自动导入（已导入过的直接复用）；签名和摘要照样校验，不对就报错
+        # 只在打包后的 exe 里自动找：源码运行和测试不能去导入真实的大文件
+        default = flashpack.find_default_pack() if getattr(sys, 'frozen', False) else None
+        if default:
+            self.note(f'自动找到刷机包：{default}')
+            self.load(str(default))
 
     def use_pack(self, folder, manifest):
         self.pack_dir, self.manifest = folder, manifest
@@ -62,9 +69,13 @@ class FlashTab:
         self.start_button.config(state='normal')
 
     def import_pack(self):
-        path = filedialog.askopenfilename(title='选择刷机包', filetypes=[('RustSimHub 刷机包', '*.rshpack'), ('所有文件', '*.*')])
-        if not path:
-            return
+        default = flashpack.find_default_pack()
+        path = filedialog.askopenfilename(title='选择刷机包', initialdir=str(default.parent) if default else None,
+                                          filetypes=[('RustSimHub 刷机包', '*.rshpack'), ('所有文件', '*.*')])
+        if path:
+            self.load(path)
+
+    def load(self, path):
         self.import_button.config(state='disabled')
         self.start_button.config(state='disabled')
         self.pack_label.config(text='正在校验并导入…')
