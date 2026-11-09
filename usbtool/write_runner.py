@@ -163,6 +163,22 @@ def run_step(plan, step_name, confirm, reader, ep_out, ep_in, log=print, progres
             sha = backup.hash_range(reader, seg['first_sector'], seg['sectors'], sink, progress, f'前像 {seg["first_sector"]}')
         report['preimage'].append({'file': path.name, 'first_sector': seg['first_sector'], 'sectors': seg['sectors'],
                                    'sha256': sha})
+    if step['target'] in writeplan.REFRESH_TARGETS:
+        # 刷新只能把原数据写回：载荷与刚读到的前像最多相差 REFRESH_MAX_DIFF 个扇区
+        seg, pre_file = segments[0], folder / report['preimage'][0]['file']
+        differ = []
+        with open(seg['path'], 'rb') as new, open(pre_file, 'rb') as old:
+            for index in range(seg['sectors']):
+                if new.read(gpt.SECTOR) != old.read(gpt.SECTOR):
+                    differ.append(seg['first_sector'] + index)
+        report['refresh_differing_sectors'] = differ[:200]
+        report['refresh_differing_count'] = len(differ)
+        if len(differ) > writeplan.REFRESH_MAX_DIFF:
+            report['status'] = 'refused_not_a_refresh'
+            write_report(folder, report)
+            raise WriteRefused(f'载荷与设备当前内容相差 {len(differ)} 个扇区，超过刷新允许的 {writeplan.REFRESH_MAX_DIFF} 个，'
+                               '这不是把原数据写回，拒绝写入')
+        log(f'刷新核对通过：载荷与设备当前内容只差 {len(differ)} 个扇区')
     report['status'] = 'preflight_done'
     write_report(folder, report)
 

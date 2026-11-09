@@ -6,6 +6,9 @@
 - 基带/NV/校准及其余启动链分区（NEVER_WRITE）永远不能作为目标，重写 GPT 时它们的 128 字节表项必须原样保留。
 - tz、aboot、GPT 这类启动链写入只允许在“不是原设备布局”的设备上进行（原设备布局见 policy.UFI003_LAYOUT）。
 - 每一步都绑定写入前设备 GPT 的摘要；GPT 步骤还绑定写入后的新摘要。
+- 唯一例外是“刷新”目标 modem（用户 2026-11-09 明确批准，用来修复读不稳的基带固件区）：只能整分区重写，
+  载荷与设备当前内容最多相差 REFRESH_MAX_DIFF 个扇区（也就是把原数据原样写回，只纠正读不稳的位置），
+  不能在原设备布局上做。NV/校准分区（fsg、modemst1、modemst2、fsc、sec、persist）仍然永远禁写。
 """
 import hashlib
 import json
@@ -14,7 +17,9 @@ import re
 
 from . import gpt, policy
 
-PLAN_TARGETS = frozenset({'tz', 'aboot', 'boot', 'NSHSTATE', 'rootfs', 'gpt'})
+PLAN_TARGETS = frozenset({'tz', 'aboot', 'boot', 'NSHSTATE', 'rootfs', 'gpt', 'modem'})
+REFRESH_TARGETS = frozenset({'modem'})
+REFRESH_MAX_DIFF = 64
 BOOT_CHAIN = frozenset({'tz', 'aboot', 'gpt'})
 NEVER_WRITE = frozenset(policy.DENIED_NAMES - {'tz', 'aboot'})  # 小写比较
 MUST_PROTECT = frozenset({'modem', 'fsg', 'modemst1', 'modemst2', 'fsc', 'sec', 'persist'})
@@ -126,8 +131,8 @@ def validate_step(plan, step, layout, current_primary=None, check_payloads=True)
     target = step['target']
     _require(layout['gpt_sha256'] == step['expected_gpt_sha256'],
              f'设备当前 GPT 摘要与步骤 {step["name"]} 绑定的不一致，停止（可能是别的设备或上一步状态不对）')
-    if target in BOOT_CHAIN:
-        _require(not is_original_device_layout(layout), '这台设备是原设备的分区布局，启动链（tz/aboot/GPT）写入一律拒绝')
+    if target in BOOT_CHAIN or target in REFRESH_TARGETS:
+        _require(not is_original_device_layout(layout), '这台设备是原设备的分区布局，启动链（tz/aboot/GPT）和 modem 写入一律拒绝')
     by_name = {}
     for p in layout['partitions']:
         by_name.setdefault(p['name'], []).append(p)
@@ -139,10 +144,13 @@ def validate_step(plan, step, layout, current_primary=None, check_payloads=True)
         _require(row['first_sector'] + row['sectors'] <= disk, f'保护区段 {row["name"]} 超出磁盘')
     present = {p['name'].lower() for p in layout['partitions']}
     covered = {row['name'].lower() for row in protected}
-    missing = sorted((MUST_PROTECT & present) - covered)
+    refreshing = {target.lower()} if target in REFRESH_TARGETS else set()
+    missing = sorted((MUST_PROTECT & present) - covered - refreshing)
     _require(not missing, f'计划的保护区段缺少：{", ".join(missing)}')
     listed = {(row['first_sector'], row['sectors']) for row in protected}
     for p in layout['partitions']:
+        if p['name'].lower() in refreshing:
+            continue
         if p['name'].lower() in NEVER_WRITE and (p['first_sector'], p['sectors']) not in listed:
             protected.append({'name': p['name'], 'first_sector': p['first_sector'], 'sectors': p['sectors'], 'implicit': True})
 
@@ -153,6 +161,12 @@ def validate_step(plan, step, layout, current_primary=None, check_payloads=True)
                  'GPT 步骤必须正好是主 GPT（扇区 0 起 34 个）和备份 GPT（最后 33 个扇区）两段')
         _require(isinstance(step.get('expected_gpt_after_sha256'), str) and HEX64.match(step['expected_gpt_after_sha256']),
                  'GPT 步骤必须给出写入后的新 GPT 摘要')
+    elif target in REFRESH_TARGETS:
+        _require(len(by_name.get(target, [])) == 1, f'当前分区表中 {target} 出现 {len(by_name.get(target, []))} 次，需要恰好 1 次')
+        part = by_name[target][0]
+        _require(len(segments) == 1 and (segments[0]['first_sector'], segments[0]['sectors']) == (part['first_sector'], part['sectors']),
+                 f'{target} 刷新必须整分区重写（扇区 {part["first_sector"]} 起 {part["sectors"]} 个）')
+        _require('expected_gpt_after_sha256' not in step, '只有 GPT 步骤可以改变分区表')
     else:
         _require(target.lower() not in NEVER_WRITE, f'{target} 永远禁写')
         _require(len(by_name.get(target, [])) == 1, f'当前分区表中 {target} 出现 {len(by_name.get(target, []))} 次，需要恰好 1 次')

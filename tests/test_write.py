@@ -187,7 +187,9 @@ def test_original_device_layout_refuses_boot_chain(stick, tmp_path, monkeypatch)
 
 @pytest.mark.parametrize('change,match', [
     (lambda p: p['steps'][0].update(target='sbl1'), '允许名单'),
-    (lambda p: p['steps'][0].update(target='modem'), '允许名单'),
+    (lambda p: p['steps'][0].update(target='modem'), '整分区'),
+    (lambda p: p['steps'][0].update(target='fsg'), '允许名单'),
+    (lambda p: p['steps'][0].update(target='modemst1'), '允许名单'),
     (lambda p: p.update(protected=[r for r in p['protected'] if r['name'] != 'modemst2']), 'modemst2'),
     (lambda p: p['steps'][0]['segments'][0].update(first_sector=1411), '分区起点'),
     (lambda p: p['steps'][0]['segments'][0].update(sha256='00' * 32), 'SHA256'),
@@ -480,3 +482,56 @@ def test_device_event_keeps_loader_digest_in_write_jobs(stick, tmp_path, capsys)
     events = [worker.parse_line(l) for l in capsys.readouterr().out.splitlines() if l.startswith(worker.PREFIX)]
     device = next(e['device'] for e in events if e['type'] == 'device')
     assert device['loader_sha256'] == hashlib.sha256(b'x').hexdigest() != step_sha
+
+
+NO_MODEM = [r for r in PROTECTED if r['name'] != 'modem']
+
+
+def refresh_plan(tmp_path, disk, payload):
+    path = make_plan(tmp_path, disk, [('modem', 'modem', 100, payload)])
+    data = json.loads(path.read_text(encoding='utf-8'))
+    data['protected'] = NO_MODEM
+    path.write_text(json.dumps(data), encoding='utf-8')
+    return path
+
+
+def test_modem_refresh_rewrites_same_data_and_leaves_nv_alone(stick, tmp_path):
+    good = stick.range(100, 1099)
+    stick.flaky = {600: {1}, 601: {1}}  # 写入前的那次读取读错（写后是否恢复只能真机看）
+    nv = stick.range(1100, 1965)
+    report, _ = run(refresh_plan(tmp_path, stick, good), stick, step='modem')
+    assert report['status'] == 'verified'
+    assert report['refresh_differing_count'] == 2
+    assert stick.range(100, 1099) == good and stick.range(1100, 1965) == nv
+    assert all(r['changed_sectors'] == 0 for r in report['protected_after'])
+
+
+def test_modem_refresh_refuses_different_content(stick, tmp_path):
+    other = bytes(512 * 1000)
+    before = bytes(stick.data)
+    with pytest.raises(write_runner.WriteRefused, match='不是把原数据写回'):
+        run(refresh_plan(tmp_path, stick, other), stick, step='modem')
+    assert bytes(stick.data) == before
+    assert not list(write_runner.attempts_dir().glob('*.json'))  # 拒绝发生在消耗尝试之前
+
+
+def test_modem_refresh_must_cover_whole_partition(stick, tmp_path):
+    with pytest.raises(writeplan.PlanError, match='整分区'):
+        run(refresh_plan(tmp_path, stick, stick.range(100, 599)), stick, step='modem')
+
+
+def test_modem_refresh_refused_on_original_device_layout(stick, tmp_path, monkeypatch):
+    layout, _ = current_gpt(stick)
+    by = {p['name']: p for p in layout['partitions']}
+    monkeypatch.setattr(policy, 'UFI003_LAYOUT', {by[n]['index']: (n, by[n]['bytes']) for n in ('boot', 'rootfs', 'NSHSTATE')})
+    with pytest.raises(writeplan.PlanError, match='原设备'):
+        run(refresh_plan(tmp_path, stick, stick.range(100, 1099)), stick, step='modem')
+
+
+def test_modem_refresh_still_needs_every_nv_partition_protected(stick, tmp_path):
+    path = refresh_plan(tmp_path, stick, stick.range(100, 1099))
+    data = json.loads(path.read_text(encoding='utf-8'))
+    data['protected'] = [r for r in NO_MODEM if r['name'] != 'persist']
+    path.write_text(json.dumps(data), encoding='utf-8')
+    with pytest.raises(writeplan.PlanError, match='persist'):
+        run(path, stick, step='modem')
