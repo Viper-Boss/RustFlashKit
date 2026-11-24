@@ -47,7 +47,28 @@ jobs:
           if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $env:EDL_SHA256) {
               throw 'EDL source hash differs from the pinned dependency'
           }
-          & $py -m pip install --no-deps $archive
+          # The upstream package symlinks edlclient/edl.py to the top-level file.
+          # Materialize that verified file on Windows, where tar extraction can omit the symlink.
+          @'
+          from pathlib import Path
+          import os
+          import tarfile
+
+          commit = os.environ["EDL_COMMIT"]
+          root = Path(".edl-build")
+          with tarfile.open(f"edl-source-{commit}.tar.gz") as archive:
+              prefix = f"edl-{commit}"
+              link = archive.getmember(f"{prefix}/edlclient/edl.py")
+              if not link.issym() or link.linkname != "../edl.py":
+                  raise ValueError("Unexpected link in pinned EDL source")
+              archive.extractall(root, filter="data", members=(
+                  entry for entry in archive if entry.isreg() or entry.isdir()
+              ))
+          source = root / prefix
+          (source / "edlclient/edl.py").write_bytes((source / "edl.py").read_bytes())
+          '@ | & $py -
+          if ($LASTEXITCODE -ne 0) { throw 'EDL source prep failed' }
+          & $py -m pip install --no-deps ".edl-build/edl-$env:EDL_COMMIT"
           if ($LASTEXITCODE -ne 0) { throw 'EDL install failed' }
       - name: Test and package Windows executables
         run: |
