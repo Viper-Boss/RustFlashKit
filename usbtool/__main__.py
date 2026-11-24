@@ -8,6 +8,12 @@ def main(argv=None):
         from . import worker
         return worker.main(argv[1])
     if argv:
+        # The frozen Windows console defaults to the local ANSI code page when
+        # its output is piped or logged. Use UTF-8 to preserve Chinese messages.
+        if sys.platform == 'win32':
+            for stream in (sys.stdout, sys.stderr):
+                if hasattr(stream, 'reconfigure') and not stream.isatty():
+                    stream.reconfigure(encoding='utf-8')
         from . import cli
         return cli.main(argv)
     from . import gui
