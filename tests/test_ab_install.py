@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 import hashlib
 from pathlib import Path
+import zipfile
 
 import pytest
 
@@ -86,6 +87,25 @@ def run(folder, disk, phase, *, retry=False, fault=None, device=DEVICE):
     target.max_payload = dict(oneclick.PHASES)[phase]
     return oneclick.run_session(folder, phase, disk.read, target.out, target.inp, device,
                                 log=lambda message: None, retry=retry)
+
+
+def test_compressed_pack_must_match_signed_uncompressed_bytes(installable, tmp_path, monkeypatch):
+    original = tmp_path / 'firmware.rshpack'
+    changed = tmp_path / 'changed.rshpack'
+    cache = tmp_path / 'new-cache'
+    cache.mkdir()
+    monkeypatch.setattr(flashpack, 'packs_dir', lambda: cache)
+    with zipfile.ZipFile(original) as incoming, zipfile.ZipFile(changed, 'x') as outgoing:
+        assert incoming.getinfo('RSH_A.img').compress_type == zipfile.ZIP_DEFLATED
+        for entry in incoming.infolist():
+            data = incoming.read(entry)
+            if entry.filename == 'RSH_A.img':
+                data = bytes([data[0] ^ 1]) + data[1:]
+            outgoing.writestr(entry.filename, data, compress_type=entry.compress_type)
+    with pytest.raises(flashpack.PackError, match='RSH_A.img 与清单不一致'):
+        flashpack.import_pack(changed)
+    assert not list(cache.iterdir())
+    assert flashpack.import_pack(original).is_dir()
 
 
 def test_signed_install_full_backup_then_verify_and_publish_boot_ledger(installable):

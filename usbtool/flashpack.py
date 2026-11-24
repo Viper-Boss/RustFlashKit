@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-only
-"""刷机包（.rshpack）：一个不压缩的 zip，含 manifest.json、manifest.sig 和镜像文件。
+"""刷机包（.rshpack）：含签名清单和镜像的 ZIP。A/B 镜像可用 Deflate 压缩。
 
 一键刷机会写启动链，所以刷机包必须有 Ed25519 签名，公钥写死在 TRUSTED_KEYS；没有“跳过校验”的选项。
 镜像只能是 IMAGES 列出的这几种。包里还可以带 Firehose 加载器（高通专有文件，这样的包只能自用，不能公开分发）。
@@ -164,7 +164,7 @@ def create_ab_pack(output, name, version, profile, aboot_sha256, images, key_pat
         pack.writestr('manifest.json', raw)
         pack.writestr('manifest.sig', key.sign(raw))
         for label, path in images.items():
-            pack.write(path, f'{label}.img')
+            pack.write(path, f'{label}.img', compress_type=zipfile.ZIP_DEFLATED, compresslevel=3)
     return manifest
 
 
@@ -218,6 +218,9 @@ def import_pack(path, progress=None):
         _require(len(names) == len(set(names)) and {'manifest.json', 'manifest.sig'} <= set(names), '刷机包缺少清单或签名')
         _require(pack.getinfo('manifest.json').file_size <= 1 << 20 and pack.getinfo('manifest.sig').file_size == 64,
                  '刷机包清单或签名大小无效')
+        _require(all(pack.getinfo(name).compress_type == zipfile.ZIP_STORED
+                     and not pack.getinfo(name).flag_bits & 1 for name in ('manifest.json', 'manifest.sig')),
+                 '刷机包清单和签名必须为未压缩的明文条目')
         raw, signature = pack.read('manifest.json'), pack.read('manifest.sig')
         _require(len(raw) <= 1 << 20, '刷机包清单过大')
         _verify_signature(raw, signature)
@@ -228,13 +231,14 @@ def import_pack(path, progress=None):
         validate_manifest(manifest)
         files = list(manifest['images'].values()) + ([manifest['loader']] if manifest.get('loader') else [])
         _require(set(names) == {'manifest.json', 'manifest.sig'} | {f['file'] for f in files}, '刷机包里有清单之外的文件')
-        for info in pack.infolist():
-            _require(info.compress_type == zipfile.ZIP_STORED and not info.flag_bits & 1, '刷机包不能压缩或加密')
+        allowed_methods = (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED) if manifest['kind'] == AB_KIND else (zipfile.ZIP_STORED,)
+        for file in files:
+            info = pack.getinfo(file['file'])
+            _require(info.compress_type in allowed_methods and not info.flag_bits & 1, '刷机包压缩方式不受支持或条目已加密')
+            _require(info.file_size == file['bytes'], '刷机包 ZIP 条目的长度与签名清单不一致')
         target = packs_dir() / hashlib.sha256(raw).hexdigest()[:16]
         if target.is_dir() and check_imported(target) is not None:
             return target
-        _require(all(pack.getinfo(info['file']).file_size == info['bytes'] for info in files),
-                 '刷机包 ZIP 条目的长度与签名清单不一致')
         _require(shutil.disk_usage(target.parent).free >= sum(info['bytes'] for info in files), '磁盘空间不足以解包')
         partial = target.with_name(target.name + '.partial')
         if partial.exists():
@@ -243,21 +247,26 @@ def import_pack(path, progress=None):
             shutil.rmtree(target)
         partial.mkdir()
         total, done = sum(f['bytes'] for f in files), 0
-        for info in files:
-            h = hashlib.sha256()
-            with pack.open(info['file']) as source, open(partial / info['file'], 'xb') as sink:
-                for block in iter(lambda: source.read(4 << 20), b''):
-                    h.update(block)
-                    sink.write(block)
-                    done += len(block)
-                    if progress:
-                        progress(done, total)
-            if h.hexdigest() != info['sha256'] or os.path.getsize(partial / info['file']) != info['bytes']:
+        try:
+            for info in files:
+                h = hashlib.sha256()
+                with pack.open(info['file']) as source, open(partial / info['file'], 'xb') as sink:
+                    for block in iter(lambda: source.read(4 << 20), b''):
+                        h.update(block)
+                        sink.write(block)
+                        done += len(block)
+                        if progress:
+                            progress(done, total)
+                _require(h.hexdigest() == info['sha256'] and os.path.getsize(partial / info['file']) == info['bytes'],
+                         f'{info["file"]} 与清单不一致，刷机包可能已损坏')
+            (partial / 'manifest.json').write_bytes(raw)
+            (partial / 'manifest.sig').write_bytes(signature)
+            os.replace(partial, target)
+        except (OSError, zipfile.BadZipFile, zlib.error) as err:
+            raise PackError(f'解包失败：{err}') from None
+        finally:
+            if partial.is_dir():
                 shutil.rmtree(partial)
-                raise PackError(f'{info["file"]} 与清单不一致，刷机包可能已损坏')
-        (partial / 'manifest.json').write_bytes(raw)
-        (partial / 'manifest.sig').write_bytes(signature)
-        os.replace(partial, target)
     return target
 
 

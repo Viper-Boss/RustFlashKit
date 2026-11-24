@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 25
     env:
       PYTHONUTF8: "1"
-      RELEASE_TAG: v0.1.0-ab-preview.2
+      RELEASE_TAG: v0.1.0-ab-preview.3
       EDL_COMMIT: 1cda1a616748d608667b2d13b73a28d3197ceb45
       EDL_SHA256: 00c50cf6eda58d1e2c47092f699f0eec6ca4e6f1e9b915db9e9a68db038286c5
     defaults:
@@ -96,11 +96,11 @@ jobs:
           @'
           Windows x64 源码编译预览。包含图形版、命令行版、SHA256 校验文件及配套 EDL 源码。
 
-          本版识别 UFI003 和容量，预览 4 GB/8 GB A/B 分区，并能连接支持串口协议的运行中固件。格式 2 的签名整机包支持两阶段写入，全盘备份核对通过后才开始改分区。
+          本版识别 UFI003 和容量，预览 4 GB/8 GB A/B 分区，并能连接支持串口协议的运行中固件。格式 2 的签名整机包支持压缩镜像和两阶段写入，全盘备份核对通过后才开始改分区。
 
           刷写路径已通过设备模拟，实体棒子的首启和回退仍待验证。此次发布只包含工具。
 
           9008 模式需自行选择适配的 Firehose 加载器。
           '@ | Set-Content -Encoding utf8 release-notes.md
-          gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --prerelease --latest=false --title 'RustSimHub USB 工具 · A/B 预览 2' --notes-file release-notes.md dist/RustSimHub-UsbTool.exe dist/RustSimHub-UsbTool-cli.exe SHA256SUMS.txt "edl-source-$env:EDL_COMMIT.tar.gz"
+          gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --prerelease --latest=false --title 'RustSimHub USB 工具 · A/B 预览 3' --notes-file release-notes.md dist/RustSimHub-UsbTool.exe dist/RustSimHub-UsbTool-cli.exe SHA256SUMS.txt "edl-source-$env:EDL_COMMIT.tar.gz"
           if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }
