@@ -41,9 +41,12 @@ def freeze_receipt(path, contents):
 
 def partition_step(name, info, layout, pack_dir):
     part = next(p for p in layout['partitions'] if p['name'] == name)
-    require(info['bytes'] == part['bytes'], f'{name} 镜像和设备规划大小不一致')
+    if name == 'RSH_AUDIO':
+        require(info['bytes'] <= part['bytes'], '录音文件系统种子大于目标分区')
+    else:
+        require(info['bytes'] == part['bytes'], f'{name} 镜像和设备规划大小不一致')
     return {'name': name, 'target': name, 'expected_gpt_sha256': layout['gpt_sha256'],
-            'segments': [{'first_sector': part['first_sector'], 'sectors': part['sectors'],
+            'segments': [{'first_sector': part['first_sector'], 'sectors': info['bytes'] // gpt.SECTOR,
                           'payload': str((Path(pack_dir)/info['file']).resolve()), 'sha256': info['sha256']}]}
 
 

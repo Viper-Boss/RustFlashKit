@@ -69,7 +69,8 @@ def installable(tmp_path, monkeypatch):
         if name not in flashpack.AB_IMAGES:
             continue
         path = tmp_path / f'{name}.img'
-        path.write_bytes(bytes(row['bytes']) if name == 'RSH_BOOTCTL' else bytes([row['index']])*row['bytes'])
+        size = 64 * block if name == 'RSH_AUDIO' else row['bytes']
+        path.write_bytes(bytes(size) if name == 'RSH_BOOTCTL' else bytes([row['index']])*size)
         images[name] = path
     key = tmp_path / 'signing.key'
     public = flashpack.generate_key(key)
@@ -124,6 +125,13 @@ def test_signed_install_full_backup_then_verify_and_publish_boot_ledger(installa
     actual, _, _ = backup.read_layout(disk.read)
     assert actual == target
     for part in actual['partitions']:
+        if part['name'] == 'RSH_AUDIO':
+            start = part['first_sector'] * 512
+            seed_bytes = (folder/'RSH_AUDIO.img').stat().st_size
+            end = (part['last_sector'] + 1) * 512
+            assert seed_bytes < end - start
+            assert disk.data[start:start+seed_bytes] == (folder/'RSH_AUDIO.img').read_bytes()
+            assert disk.data[start+seed_bytes:end] == source[start+seed_bytes:end]
         if part['name'] not in flashpack.AB_IMAGES:
             assert disk.range(part['first_sector'], part['last_sector']) == source[part['first_sector']*512:(part['last_sector']+1)*512]
     with pytest.raises(oneclick.FlashStopped, match='重新初始化'):
