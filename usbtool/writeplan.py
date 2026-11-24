@@ -12,7 +12,7 @@ import json
 import os
 import re
 
-from . import gpt, policy
+from . import gpt, policy, storage_layout
 
 PLAN_TARGETS = frozenset({'tz', 'aboot', 'boot', 'NSHSTATE', 'rootfs', 'gpt'})
 BOOT_CHAIN = frozenset({'tz', 'aboot', 'gpt'})
@@ -43,7 +43,7 @@ def file_sha256(path):
     return h.hexdigest()
 
 
-def load_plan(path):
+def load_plan(path, *, ab_layout=False):
     path = os.path.abspath(path)
     with open(path, 'rb') as stream:
         raw = stream.read()
@@ -55,13 +55,14 @@ def load_plan(path):
     _require(isinstance(plan.get('steps'), list) and plan['steps'], '计划没有步骤')
     _require(isinstance(plan.get('protected'), list) and plan['protected'], '计划没有保护区段')
     names = set()
+    allowed = PLAN_TARGETS | storage_layout.TARGET if ab_layout else PLAN_TARGETS
     for step in plan['steps']:
         _require(isinstance(step, dict) and set(step) <= {'name', 'target', 'expected_gpt_sha256',
                                                           'expected_gpt_after_sha256', 'segments'}, '步骤含有未知字段')
         _require(isinstance(step.get('name'), str) and STEP_NAME.match(step['name']) and step['name'] not in names,
                  '步骤名无效或重复')
         names.add(step['name'])
-        _require(step.get('target') in PLAN_TARGETS, f'步骤 {step["name"]} 的目标不在允许名单 {sorted(PLAN_TARGETS)} 中')
+        _require(step.get('target') in allowed, f'步骤 {step["name"]} 的目标不在允许名单 {sorted(allowed)} 中')
         _require(isinstance(step.get('expected_gpt_sha256'), str) and HEX64.match(step['expected_gpt_sha256']),
                  f'步骤 {step["name"]} 缺少写入前 GPT 摘要')
         segments = step.get('segments')
@@ -77,6 +78,7 @@ def load_plan(path):
         _require(isinstance(row, dict) and set(row) == {'name', 'first_sector', 'sectors'} and isinstance(row['name'], str)
                  and _int(row['first_sector']) and row['first_sector'] >= 0 and _int(row['sectors']) and row['sectors'] > 0,
                  '保护区段字段必须正好是 name、first_sector、sectors')
+    plan['_ab_layout'] = ab_layout
     plan['_path'] = path
     plan['_sha256'] = hashlib.sha256(raw).hexdigest()
     return plan
@@ -132,6 +134,8 @@ def validate_step(plan, step, layout, current_primary=None, check_payloads=True)
     for p in layout['partitions']:
         by_name.setdefault(p['name'], []).append(p)
     disk = layout['disk_sectors']
+    if set(by_name) & storage_layout.TARGET:
+        _require(plan.get('_ab_layout') is True, 'A/B 分区只允许使用签名包专用流程')
 
     # 保护区：计划给出的 + 工具从当前布局自己算出的禁写分区，取并集
     protected = [dict(row) for row in plan['protected']]
@@ -186,6 +190,8 @@ def validate_step(plan, step, layout, current_primary=None, check_payloads=True)
             new_layout = gpt.parse_gpt(primary, backup_part, disk)
         except gpt.GptError as err:
             raise PlanError(f'新 GPT 无效：{err}') from None
+        if {part['name'] for part in new_layout['partitions']} & storage_layout.TARGET:
+            _require(plan.get('_ab_layout') is True, '创建 A/B 分区需使用签名包专用流程')
         _require(new_layout['gpt_sha256'] == step['expected_gpt_after_sha256'], '新 GPT 的摘要与计划给出的写入后摘要不一致')
         if current_primary is not None:
             old_rows, new_rows = gpt_entries_by_name(current_primary), gpt_entries_by_name(primary)

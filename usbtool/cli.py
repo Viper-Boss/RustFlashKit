@@ -3,6 +3,8 @@
 import argparse
 import json
 import os
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import sys
 import threading
 import time
@@ -102,7 +104,10 @@ def _flash(args):
                'allow_unknown_loader': bool(manifest.get('loader'))}
         if _run_job(job) != 0:
             return 1
-    print('刷机完成，棒子正在重启。')
+    if manifest['kind'] == flashpack.AB_KIND:
+        print('A/B 写入与回读完成，可以手动正常启动棒子。')
+    else:
+        print('刷机完成，棒子正在重启。')
     return 0
 
 
@@ -180,6 +185,13 @@ def main(argv):
     for image in flashpack.IMAGES:
         c.add_argument(f'--{image.lower()}', required=True, metavar='镜像文件')
     c.add_argument('--with-loader', help='把加载器打进包里（这样的包只能自用，不能公开分发）')
+    ab = sub.add_parser('ab-pack-create', help='生成并签名 A/B 初始化刷机包')
+    ab.add_argument('--output', required=True)
+    ab.add_argument('--name', required=True)
+    ab.add_argument('--version', required=True)
+    ab.add_argument('--key', required=True)
+    ab.add_argument('--aboot-sha256', required=True)
+    ab.add_argument('--verified-inputs', type=Path, required=True, help='固件构建器输出的 A/B 输入报告')
     im = sub.add_parser('pack-import', help='校验并导入刷机包')
     im.add_argument('pack')
     fl = sub.add_parser('flash', help='一键刷机（只支持 USB 方式）')
@@ -224,6 +236,21 @@ def main(argv):
         try:
             flashpack.create_pack(args.output, args.name, args.version, images, args.key, args.with_loader)
         except (flashpack.PackError, OSError) as err:
+            print(f'错误：{err}', file=sys.stderr)
+            return 1
+        print(f'已生成：{args.output}')
+        return 0
+    if args.command == 'ab-pack-create':
+        try:
+            inputs = json.loads(args.verified_inputs.read_text(encoding='utf-8'))
+            images = flashpack.ab_pack_inputs(inputs)
+            with TemporaryDirectory() as tmp:
+                ledger = Path(tmp) / 'RSH_BOOTCTL.img'
+                ledger.write_bytes(flashpack.install_boot_ledger())
+                images['RSH_BOOTCTL'] = ledger
+                flashpack.create_ab_pack(args.output, args.name, args.version, inputs['profile_gb'], args.aboot_sha256,
+                                         images, args.key)
+        except (OSError, ValueError) as err:
             print(f'错误：{err}', file=sys.stderr)
             return 1
         print(f'已生成：{args.output}')

@@ -163,7 +163,7 @@ def run(job, link_factory=None):
                                               tool_version=__version__, retry=job.get('retry', False))
             except oneclick.FlashStopped as err:
                 raise ValueError(str(err)) from None
-            if result['done']:
+            if result['done'] and not result.get('manual_reboot'):
                 log('全部写入并校验通过，请求设备正常重启（仅一次）')
                 link.reset()
             emit('result', action='flash', result=result)

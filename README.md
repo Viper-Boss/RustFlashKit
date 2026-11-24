@@ -141,3 +141,9 @@ powershell -ExecutionPolicy Bypass -File build.ps1   # 先跑测试，再生成 
 「分区表与备份 → 识别型号和容量」读取并比对主备 GPT，显示型号和容量。支持的 UFI003 布局会额外列出 4 GB 或 8 GB 双槽方案。二次校验通过的出厂固件标签用于识别型号。无法确认型号、布局或安全可用空间时，只显示现有分区及原因。预览只读，旧刷机包仍使用原来的流程。
 
 运行中且提供 USB 串口维护接口的 RustSimHub 可以在「USB 维护」里直接识别型号和容量、读取 SSH 状态或持久启停 SSH。单台可自动选择，多台时填写其 COM 号或 Linux 串口名。命令行可用 `usb-maintenance device-info`、`usb-maintenance ssh-status`、`usb-maintenance ssh-on`、`usb-maintenance ssh-off`，可附加 `--port`。维护走物理 USB 串口，不需要网页登录。网络 SSH 登录仍使用设备上已安装的维护公钥。
+
+### A/B 整机包（开发）
+
+分支已接入格式 2 签名整机包。接收固件仓库生成的同源输入报告，使用 `ab-pack-create --verified-inputs <报告> --aboot-sha256 <兼容引导摘要> --key <私钥> --name <名称> --version <版本> --output <新包>` 在隔离构建环境签包。
+
+按已确认的 UFI003、现有 64 MiB boot 和兼容 aboot 执行。先核对容量、备份原盘两次、生成并核对主备 GPT，再按提示重新进入 9008 写入两个系统槽与共享分区，最后写启动账本。原来的数据需要从备份另行迁移。完整流程目前只通过模拟设备测试。

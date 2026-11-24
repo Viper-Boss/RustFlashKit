@@ -95,11 +95,14 @@ class FlashTab:
         if not self.manifest.get('loader') and not self.app.loader.get():
             messagebox.showwarning('缺少加载器', '这个刷机包没有带加载器，请先在上方选择 Firehose 加载器')
             return
-        answer = simpledialog.askstring('确认刷机', (
-            f'将把棒子刷成“{self.manifest["name"]} {self.manifest["version"]}”。\n\n'
-            '会改写：分区表、aboot、boot、NSHSTATE、rootfs，棒子原来的安卓系统和数据都会被清掉。\n'
-            '不会写：基带、NV、校准分区（写入前后都会核对）。\n\n'
-            f'确认的话请输入：{CONFIRM_WORD}'), parent=self.app.root)
+        if self.manifest.get('kind') == flashpack.AB_KIND:
+            notice = ('将重新初始化棒子的系统和数据分区。原有短信、通话记录和配置不会自动导入。\n'
+                      '工具会先备份并复核原盘。基带、NV、校准分区和 aboot 会保留。\n\n')
+        else:
+            notice = ('会改写分区表、aboot、boot、NSHSTATE 和 rootfs，清除原来的安卓系统和数据。\n'
+                      '写入前后都会核对基带、NV 和校准分区。\n\n')
+        description = f'将把棒子刷成“{self.manifest["name"]} {self.manifest["version"]}”。\n\n'
+        answer = simpledialog.askstring('确认刷机', description + notice + f'请输入：{CONFIRM_WORD}', parent=self.app.root)
         if answer != CONFIRM_WORD:
             return
         self.steps.delete('1.0', 'end')
@@ -164,10 +167,12 @@ class FlashTab:
             self.note(f'{name}：已是目标内容，跳过')
         if result['done']:
             self.phase_index = None
-            self.state.set('刷机完成，棒子正在重启。首次开机需要几分钟。')
+            manual = result.get('manual_reboot', False)
+            self.state.set('A/B 已写入并核对，可手动启动棒子。' if manual else '刷机完成，棒子正在重启。首次开机需要几分钟。')
             self.app.banner.say('happy', '刷机完成')
             self.start_button.config(state='normal')
-            messagebox.showinfo('刷机完成', '全部写入并校验通过，棒子已请求重启。')
+            messagebox.showinfo('刷机完成', '全部写入并校验通过，可手动启动棒子。' if manual
+                                else '全部写入并校验通过，棒子已请求重启。')
         else:
             self.pending_next = self.phase_index + 1
 

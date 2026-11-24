@@ -38,11 +38,17 @@ def protected_ranges(layout):
             for p in layout['partitions'] if p['name'].lower() in names]
 
 
-def _save_plan(folder, name, layout, steps):
-    plan = {'format': 1, 'kind': 'usbtool-write-plan', 'description': name, 'protected': protected_ranges(layout), 'steps': steps}
+def _save_plan(folder, name, layout, steps, *, ab_layout=False):
+    if ab_layout:
+        from .storage_layout import TARGET, NATIVE, STOCK
+        protected = [{'name': p['name'], 'first_sector': p['first_sector'], 'sectors': p['sectors']}
+                     for p in layout['partitions'] if p['name'] not in TARGET | NATIVE | STOCK | {'boot'}]
+    else:
+        protected = protected_ranges(layout)
+    plan = {'format': 1, 'kind': 'usbtool-write-plan', 'description': name, 'protected': protected, 'steps': steps}
     path = folder / f'{name}-plan.json'
     path.write_text(json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
-    return writeplan.load_plan(path)
+    return writeplan.load_plan(path, ab_layout=ab_layout)
 
 
 def gpt_plan_file(folder, layout, primary, backup_gpt):
@@ -98,9 +104,10 @@ def _preflight_backup(folder, read, layout, device, log, progress, on_disk_secto
 def _run_plan_step(plan, step, read, ep_out, ep_in, payload_size, log, progress, on_disk_sectors, tool_version, retry):
     digest = writeplan.step_digest(plan, step)
     marker = write_runner.attempts_dir() / f'{digest}.json'
-    if marker.exists() and not retry:
-        raise FlashStopped(f'{step["name"]} 上次写入没有成功。检查报告后，需要你再次确认才会重试')
-    marker.unlink(missing_ok=True)
+    if marker.exists():
+        if not retry:
+            raise FlashStopped(f'{step["name"]} 上次写入没有成功。检查报告后，需要你再次确认才会重试')
+        marker.unlink()
     report, folder = write_runner.run_step(plan, step['name'], digest, read, ep_out, ep_in, log=log, progress=progress,
                                            on_disk_sectors=on_disk_sectors, tool_version=tool_version,
                                            preconfigured_payload=payload_size)
@@ -120,6 +127,10 @@ def run_session(pack_dir, phase, read, ep_out, ep_in, device, log=print, progres
     manifest = flashpack.check_imported(pack_dir, deep=True)
     if manifest is None:
         raise FlashStopped('刷机包校验失败，请重新导入')
+    if manifest['kind'] == flashpack.AB_KIND:
+        from . import ab_install
+        return ab_install.run_session(pack_dir, manifest, phase, read, ep_out, ep_in, device,
+                                      log, progress, on_disk_sectors, tool_version, retry)
     if device.get('chip_ok') is not True:
         raise FlashStopped('芯片不是已确认的 MSM8916，停止')
     folder = work_dir(pack_dir)

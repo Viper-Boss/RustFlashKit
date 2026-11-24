@@ -155,6 +155,11 @@ def run_step(plan, step_name, confirm, reader, ep_out, ep_in, log=print, progres
                                    'sha256_read1': a[0], 'sha256_read2': b[0], 'stable': a[0] == b[0]}
                                   for r, (a, b) in zip(protected, pre)]
 
+    if plan.get('_ab_layout') and not all(row['stable'] for row in report['protected_before']):
+        report['status'] = 'protected_unstable'
+        write_report(folder, report)
+        raise WriteRefused('A/B 写入前保护区读数不一致，未写入')
+
     # 3. 目标区前像（回退用证据）
     report['preimage'] = []
     for i, seg in enumerate(segments):
