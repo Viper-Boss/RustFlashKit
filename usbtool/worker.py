@@ -11,7 +11,7 @@ import threading
 import time
 import traceback
 
-from . import backup, board_id, paths, policy
+from . import backup, board_id, gpt, paths, policy, storage_layout
 
 PREFIX = '@@USBTOOL '
 ACTIONS = ('probe', 'backup', 'write', 'storage', 'flash')
@@ -171,10 +171,21 @@ def run(job, link_factory=None):
             from . import emmc_life
             emit('result', action='storage', report=emmc_life.from_firehose(link.storage_info()))
         elif job['action'] == 'probe':
-            layout, _p, _b = backup.read_layout(link.read, link.set_disk_sectors)
+            layout, primary, _backup = backup.read_layout(link.read, link.set_disk_sectors)
+            header = gpt.parse_header(primary[gpt.SECTOR:2 * gpt.SECTOR], 1)
             board = board_id.identify(link.read, layout, progress)
+            storage_plan = None
+            warnings = policy.ufi003_warnings(layout)
+            try:
+                if device.get('chip_ok') is False:
+                    raise storage_layout.LayoutError('设备芯片与 MSM8916 不匹配')
+                geometry = dict(layout, first_usable=header['first_usable'], last_usable=header['last_usable'],
+                                entry_count=header['count'])
+                storage_plan = storage_layout.plan_layout(geometry, board['family'])
+            except storage_layout.LayoutError as err:
+                warnings.append(f'A/B 规划暂不可用：{err}')
             emit('result', action='probe', device=device, layout=layout, board=board,
-                 warnings=policy.ufi003_warnings(layout))
+                 warnings=warnings, storage_plan=storage_plan)
         elif job['action'] == 'write':
             from . import __version__, write_runner
             if device.get('msm_id') is None:

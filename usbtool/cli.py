@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 
-from . import backup, board_id, detect, dryrun, edl_link, emmc_life, flashpack, oneclick, paths, worker
+from . import backup, board_id, detect, dryrun, edl_link, emmc_life, flashpack, maintenance, oneclick, paths, storage_layout, worker
 
 
 PROBE_TIMEOUT = 300  # 秒；与界面一致。工作进程自身另有看门狗
@@ -45,6 +45,9 @@ def _pump(proc, code):
             code = 0
             if event['action'] == 'probe':
                 print('棒子型号：' + board_id.describe(event['board']))
+                print(f'容量（GPT）：{event["layout"]["disk_bytes"]:,} 字节')
+                if event.get('storage_plan'):
+                    print('\n'.join(storage_layout.format_plan(event['storage_plan'])))
                 for p in event['layout']['partitions']:
                     print(f'{p["index"]:>3} {p["name"]:<12} 起始 {p["first_sector"]:>10} 大小 {p["bytes"]:>12}')
                 for w in event['warnings']:
@@ -155,6 +158,9 @@ def main(argv):
             p.add_argument('--plan', required=True)
             p.add_argument('--step', required=True, help='只执行这一步')
             p.add_argument('--confirm', required=True, help='步骤摘要（write-dryrun 会给出；至少前 16 位）')
+    usb = sub.add_parser('usb-maintenance', help='开机后直连 USB 串口维护')
+    usb.add_argument('action', choices=maintenance.ACTIONS)
+    usb.add_argument('--port', help='多只设备时指定 USB 串口')
     life = sub.add_parser('emmc-life', help='只读取 eMMC 寿命：开机状态用 --identity/--known-hosts，9008 状态用 --loader')
     life.add_argument('--ssh', default='root@10.55.0.2', help='开机状态的设备地址（默认 root@10.55.0.2）')
     life.add_argument('--identity', help='维护 SSH 私钥文件')
@@ -192,6 +198,13 @@ def main(argv):
     d.add_argument('--write', action='append', required=True, metavar='分区=镜像路径[@sha256]')
     args = parser.parse_args(argv)
 
+    if args.command == 'usb-maintenance':
+        try:
+            print(maintenance.describe(maintenance.run(args.action, args.port)))
+        except (OSError, ValueError) as err:
+            print(f'错误：{err}', file=sys.stderr)
+            return 1
+        return 0
     if args.command == 'selfcheck':
         return selfcheck()
     if args.command == 'detect':

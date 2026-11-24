@@ -7,6 +7,7 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from . import maintenance, storage_layout
 from . import __version__, backup, board_id, detect, dryrun, emmc_life, header, paths, policy, theme, worker
 from .gui_flash import FlashTab
 from .gui_wifi import WifiTab
@@ -60,6 +61,7 @@ class App:
         self.build_backup_tab(tabs)
         self.build_dryrun_tab(tabs)
         WifiTab(tabs, self)
+        self.build_maintenance_tab(tabs)
         self.build_life_tab(tabs)
         self.build_later_tab(tabs)
 
@@ -76,12 +78,44 @@ class App:
         root.after(100, self.pump)
 
     # ---------- 界面构造 ----------
+    def build_maintenance_tab(self, tabs):
+        frame = ttk.Frame(tabs)
+        tabs.add(frame, text='USB 维护')
+        ttk.Label(frame, text='用数据线接上已启动的棒子。多台同时连接时，填入要操作的 USB 串口。').pack(anchor='w', padx=12, pady=8)
+        bar = ttk.Frame(frame)
+        bar.pack(anchor='w', padx=12)
+        ttk.Label(bar, text='USB 串口').pack(side='left')
+        self.maintenance_port = tk.StringVar()
+        ttk.Entry(bar, textvariable=self.maintenance_port, width=16).pack(side='left', padx=8)
+        self.maintenance_buttons = []
+        for title, action in (('识别型号和容量', 'device-info'), ('读取 SSH 状态', 'ssh-status'), ('开启 SSH', 'ssh-on'), ('关闭 SSH', 'ssh-off')):
+            button = ttk.Button(bar, text=title, command=lambda name=action: self.start_maintenance(name))
+            button.pack(side='left', padx=4)
+            self.maintenance_buttons.append(button)
+        self.maintenance_result = ttk.Label(frame, text='')
+        self.maintenance_result.pack(anchor='w', padx=12, pady=8)
+
+    def start_maintenance(self, action):
+        port = self.maintenance_port.get().strip()
+        for button in self.maintenance_buttons:
+            button.config(state='disabled')
+        self.maintenance_result.config(text='正在与棒子通信…')
+
+        def run():
+            try:
+                message = maintenance.describe(maintenance.run(action, port))
+            except (OSError, ValueError) as err:
+                message = str(err)
+            self.events.put({'type': 'maintenance', 'message': message})
+
+        threading.Thread(target=run, daemon=True).start()
+
     def build_backup_tab(self, tabs):
         frame = ttk.Frame(tabs)
         tabs.add(frame, text='分区表与备份')
         bar = ttk.Frame(frame)
         bar.pack(fill='x', pady=4)
-        self.probe_button = ttk.Button(bar, text='读取分区表', command=self.probe, style='Accent.TButton')
+        self.probe_button = ttk.Button(bar, text='识别型号和容量', command=self.probe, style='Accent.TButton')
         self.probe_button.pack(side='left', padx=4)
         self.full_disk = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text='同时全盘备份', variable=self.full_disk).pack(side='left', padx=4)
@@ -306,7 +340,11 @@ class App:
 
     def handle(self, event):
         kind = event.get('type')
-        if kind == 'log':
+        if kind == 'maintenance':
+            self.maintenance_result.config(text=event['message'])
+            for button in self.maintenance_buttons:
+                button.config(state='normal')
+        elif kind == 'log':
             if event['message'].strip():
                 self.append_log(event['message'])
         elif kind == 'progress':
@@ -325,9 +363,13 @@ class App:
             self.banner.say('idle', '芯片寿命查询结束')
         elif kind == 'result' and event['action'] == 'probe':
             self.show_layout(event['layout'], event['warnings'])
-            text = '棒子型号：' + board_id.describe(event['board'])
+            size = event['layout']['disk_bytes']
+            text = f'棒子型号：{board_id.describe(event["board"])}  ·  GPT 容量 {size / 10**9:.2f} GB'
             self.board_label.config(text=text)
             self.append_log(text)
+            if event.get('storage_plan'):
+                for line in storage_layout.format_plan(event['storage_plan']):
+                    self.append_log(line)
             self.banner.say('happy', '分区表已读取：主备 GPT 一致')
         elif kind == 'result':
             self.append_log(f'备份完成并校验通过：{event["folder"]}', 'ok')

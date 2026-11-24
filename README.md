@@ -135,3 +135,9 @@ powershell -ExecutionPolicy Bypass -File build.ps1   # 先跑测试，再生成 
 ## 许可证
 
 本程序按 **GPL-3.0-only** 发布（见 `LICENSE`）。它打包并调用了 [bkerler/edl](https://github.com/bkerler/edl)（GPLv3，© B. Kerler，固定在提交 `1cda1a6`），因此整个程序必须以 GPLv3 发布。分发 exe 时必须同时提供源码。只读护栏和 GPT 校验规则移植自 RustSimHub `tools/recovery/edl_readonly.py`。全部第三方组件见 `NOTICE.md`。Firehose 加载器是高通专有文件，不在本项目中分发。
+
+## A/B 分区预览与 USB 维护
+
+「分区表与备份 → 识别型号和容量」读取并比对主备 GPT，显示型号和容量。支持的 UFI003 布局会额外列出 4 GB 或 8 GB 双槽方案。二次校验通过的出厂固件标签用于识别型号。无法确认型号、布局或安全可用空间时，只显示现有分区及原因。预览只读，旧刷机包仍使用原来的流程。
+
+运行中且提供 USB 串口维护接口的 RustSimHub 可以在「USB 维护」里直接识别型号和容量、读取 SSH 状态或持久启停 SSH。单台可自动选择，多台时填写其 COM 号或 Linux 串口名。命令行可用 `usb-maintenance device-info`、`usb-maintenance ssh-status`、`usb-maintenance ssh-on`、`usb-maintenance ssh-off`，可附加 `--port`。维护走物理 USB 串口，不需要网页登录。网络 SSH 登录仍使用设备上已安装的维护公钥。
