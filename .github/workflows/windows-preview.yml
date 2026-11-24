@@ -1,0 +1,82 @@
+name: Windows A/B preview release
+
+on:
+  push:
+    branches: [codex/dual-slot-storage]
+    paths: [.github/workflows/windows-preview.yml]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-ab-preview-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    env:
+      PYTHONUTF8: "1"
+      RELEASE_TAG: v0.1.0-ab-preview.1
+      EDL_COMMIT: 1cda1a616748d608667b2d13b73a28d3197ceb45
+      EDL_SHA256: 00c50cf6eda58d1e2c47092f699f0eec6ca4e6f1e9b915db9e9a68db038286c5
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Install build dependencies
+        run: |
+          python -m venv .venv
+          if ($LASTEXITCODE -ne 0) { throw 'venv failed' }
+          $py = '.venv\Scripts\python.exe'
+          $requirements = Get-Content requirements.txt | Where-Object { $_ -match '^[a-zA-Z0-9_-]+==' }
+          & $py -m pip install @requirements
+          if ($LASTEXITCODE -ne 0) { throw 'install failed' }
+
+          $archive = "edl-source-$env:EDL_COMMIT.tar.gz"
+          $uri = "https://github.com/bkerler/edl/archive/$env:EDL_COMMIT.tar.gz"
+          Invoke-WebRequest -Uri $uri -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $env:EDL_SHA256) {
+              throw 'EDL source hash differs from the pinned dependency'
+          }
+          & $py -m pip install --no-deps $archive
+          if ($LASTEXITCODE -ne 0) { throw 'EDL install failed' }
+      - name: Test and package Windows executables
+        run: |
+          if (Test-Path '..\RustSimHub\.private\prog_emmc_firehose_8916.mbn') {
+              throw 'A proprietary loader is present on the release runner'
+          }
+          .\build.ps1
+          $check = & .\dist\RustSimHub-UsbTool-cli.exe selfcheck
+          $check
+          if ($LASTEXITCODE -ne 0 -or -not ($check -match 'libusb：可用')) {
+              throw 'Packaged CLI self-check or Windows libusb check failed'
+          }
+          $exe = Get-ChildItem .\dist\*.exe
+          if ($exe.Count -ne 2) { throw 'Expected two executables' }
+          $files = @($exe) + @(Get-Item "edl-source-$env:EDL_COMMIT.tar.gz")
+          $hashes = foreach ($file in $files) {
+              "$((Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($file.Name)"
+          }
+          $hashes | Set-Content -Encoding ascii SHA256SUMS.txt
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          @'
+          Windows x64 源码编译预览。包含图形版、命令行版、SHA256 校验文件及配套 EDL 源码。
+
+          本版可识别 UFI003 和容量、预览 4 GB/8 GB A/B 分区，并连接支持串口协议的运行中固件。A/B 分区规划为只读。此次发布只包含工具，未提供 A/B 固件刷机包。
+
+          9008 模式需自行选择适配的 Firehose 加载器。
+          '@ | Set-Content -Encoding utf8 release-notes.md
+          gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --prerelease --latest=false --title 'RustSimHub USB 工具 · A/B 预览 1' --notes-file release-notes.md dist/RustSimHub-UsbTool.exe dist/RustSimHub-UsbTool-cli.exe SHA256SUMS.txt "edl-source-$env:EDL_COMMIT.tar.gz"
+          if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }
