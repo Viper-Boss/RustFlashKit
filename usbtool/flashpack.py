@@ -101,7 +101,8 @@ def install_boot_ledger():
 
 
 def validate_ab_manifest(manifest):
-    _require(set(manifest) == {'format', 'kind', 'name', 'version', 'board', 'profile_gb', 'images', 'aboot_sha256'}
+    fields = {'format', 'kind', 'name', 'version', 'board', 'profile_gb', 'images', 'aboot_sha256'}
+    _require(set(manifest) in (fields, fields | {'stock_migration'})
              and type(manifest['format']) is int and manifest['format'] == 2 and manifest['board'] == 'ufi003',
              'A/B 包格式或板型无效')
     _require(all(isinstance(manifest[field], str) and 0 < len(manifest[field]) <= 128 for field in ('name', 'version')),
@@ -111,7 +112,14 @@ def validate_ab_manifest(manifest):
     pin = manifest['aboot_sha256']
     _require(isinstance(pin, str) and HEX64.fullmatch(pin), '需要已知兼容的 aboot 摘要')
     images = manifest['images']
-    _require(isinstance(images, dict) and set(images) == set(AB_IMAGES), 'A/B 包的镜像列表不完整或包含未知分区')
+    labels = set(AB_IMAGES)
+    if 'stock_migration' in manifest:
+        migration = manifest['stock_migration']
+        _require(isinstance(migration, dict) and set(migration) == {'source_gpt_sha256', 'source_aboot_sha256'}
+                 and all(isinstance(value, str) and HEX64.fullmatch(value) for value in migration.values())
+                 and migration['source_aboot_sha256'] != pin, '原厂引导迁移摘要无效')
+        labels.add('aboot')
+    _require(isinstance(images, dict) and set(images) == labels, 'A/B 包的镜像列表不完整或包含未知分区')
     slot, records, config, abuse, keys = storage_layout.PROFILES[profile]
     exact_mib = {'RSH_A': slot, 'RSH_B': slot, 'RSH_RECORDS': records, 'RSH_CONFIG': config,
                  'RSH_ABUSE': abuse, 'RSH_KEYS': keys, 'boot': 64, 'RSH_BOOTCTL': 8}
@@ -121,7 +129,9 @@ def validate_ab_manifest(manifest):
                  and HEX64.fullmatch(entry['sha256']), f'{label} 文件名或摘要无效')
         size = entry['bytes']
         _require(type(size) is int and size > 0 and size % storage_layout.MIB == 0, f'{label} 长度无效')
-        if label in exact_mib:
+        if label == 'aboot':
+            _require(size == storage_layout.MIB and entry['sha256'] == pin, '引导迁移镜像与目标摘要不匹配')
+        elif label in exact_mib:
             _require(size == exact_mib[label] * storage_layout.MIB, f'{label} 镜像大小不匹配')
         else:
             _require(64 * storage_layout.MIB <= size < profile * 1024**3, '录音镜像大小不匹配')
@@ -151,12 +161,14 @@ def ab_pack_inputs(report):
     return result
 
 
-def create_ab_pack(output, name, version, profile, aboot_sha256, images, key_path):
+def create_ab_pack(output, name, version, profile, aboot_sha256, images, key_path, *, stock_migration=None):
     manifest = {'format': 2, 'kind': AB_KIND, 'name': name, 'version': version, 'board': 'ufi003',
                 'profile_gb': profile, 'aboot_sha256': aboot_sha256, 'images': {
                     label: {'file': f'{label}.img', 'sha256': _sha256(path), 'bytes': os.path.getsize(path)}
                     for label, path in images.items()
                 }}
+    if stock_migration is not None:
+        manifest['stock_migration'] = stock_migration
     validate_ab_manifest(manifest)
     key = load_key(key_path)
     raw = json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True).encode('utf-8')

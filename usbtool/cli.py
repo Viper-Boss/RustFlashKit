@@ -192,6 +192,9 @@ def main(argv):
     ab.add_argument('--key', required=True)
     ab.add_argument('--aboot-sha256', required=True)
     ab.add_argument('--verified-inputs', type=Path, required=True, help='固件构建器输出的 A/B 输入报告')
+    ab.add_argument('--stock-source-gpt-sha256', help='迁移时核对的原厂主备 GPT 摘要')
+    ab.add_argument('--stock-source-aboot-sha256', help='迁移时核对的原厂 aboot 摘要')
+    ab.add_argument('--stock-aboot-image', type=Path, help='迁移时写入的已知兼容 aboot 镜像')
     im = sub.add_parser('pack-import', help='校验并导入刷机包')
     im.add_argument('pack')
     fl = sub.add_parser('flash', help='一键刷机（只支持 USB 方式）')
@@ -244,12 +247,19 @@ def main(argv):
         try:
             inputs = json.loads(args.verified_inputs.read_text(encoding='utf-8'))
             images = flashpack.ab_pack_inputs(inputs)
+            migration = None
+            if args.stock_source_gpt_sha256 or args.stock_source_aboot_sha256 or args.stock_aboot_image:
+                if not (args.stock_source_gpt_sha256 and args.stock_source_aboot_sha256 and args.stock_aboot_image):
+                    raise ValueError('原厂引导迁移需要来源 GPT 摘要、来源 aboot 摘要和目标 aboot 镜像')
+                migration = {'source_gpt_sha256': args.stock_source_gpt_sha256,
+                             'source_aboot_sha256': args.stock_source_aboot_sha256}
+                images['aboot'] = args.stock_aboot_image
             with TemporaryDirectory() as tmp:
                 ledger = Path(tmp) / 'RSH_BOOTCTL.img'
                 ledger.write_bytes(flashpack.install_boot_ledger())
                 images['RSH_BOOTCTL'] = ledger
                 flashpack.create_ab_pack(args.output, args.name, args.version, inputs['profile_gb'], args.aboot_sha256,
-                                         images, args.key)
+                                         images, args.key, stock_migration=migration)
         except (OSError, ValueError) as err:
             print(f'错误：{err}', file=sys.stderr)
             return 1

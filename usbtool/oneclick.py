@@ -41,8 +41,11 @@ def protected_ranges(layout):
 def _save_plan(folder, name, layout, steps, *, ab_layout=False):
     if ab_layout:
         from .storage_layout import TARGET, NATIVE, STOCK
+        image_targets = TARGET | NATIVE | STOCK | {'boot'}
+        if len(steps) == 1 and steps[0]['target'] == 'aboot':
+            image_targets = image_targets | {'aboot'}
         protected = [{'name': p['name'], 'first_sector': p['first_sector'], 'sectors': p['sectors']}
-                     for p in layout['partitions'] if p['name'] not in TARGET | NATIVE | STOCK | {'boot'}]
+                     for p in layout['partitions'] if p['name'] not in image_targets]
     else:
         protected = protected_ranges(layout)
     plan = {'format': 1, 'kind': 'usbtool-write-plan', 'description': name, 'protected': protected, 'steps': steps}

@@ -64,11 +64,11 @@ def partition_step(name, info, layout, pack_dir):
                           'payload': str((Path(pack_dir)/info['file']).resolve()), 'sha256': info['sha256']}]}
 
 
-def compatible_aboot(read, layout, pin, progress):
+def current_aboot_sha256(read, layout, progress):
     part = next((p for p in layout['partitions'] if p['name'] == 'aboot'), None)
     if part is None:
-        return False
-    return backup.hash_range(read, part['first_sector'], part['sectors'], None, progress, '核对现有引导程序') == pin
+        return None
+    return backup.hash_range(read, part['first_sector'], part['sectors'], None, progress, '核对现有引导程序')
 
 
 def run_session(pack_dir, manifest, phase, read, ep_out, ep_in, device,
@@ -80,7 +80,9 @@ def run_session(pack_dir, manifest, phase, read, ep_out, ep_in, device,
     disk = layout['disk_sectors']
     board = board_id.identify(read, layout, progress)
     require(board['family'] == 'UFI003', '无法确认 UFI003 型号，未写入')
-    require(compatible_aboot(read, layout, manifest['aboot_sha256'], progress), '现有引导程序未通过兼容核对，未写入')
+    observed_aboot = current_aboot_sha256(read, layout, progress)
+    migration = manifest.get('stock_migration')
+    target_aboot = manifest['aboot_sha256']
     folder = oneclick.work_dir(pack_dir) / f'ab-{serial.lower()}'
     folder.mkdir(exist_ok=True)
     receipt = folder/'installation.json'
@@ -104,12 +106,27 @@ def run_session(pack_dir, manifest, phase, read, ep_out, ep_in, device,
         require(not writeplan.is_original_device_layout(layout), '已登记的原设备布局禁止改写 GPT')
         source_primary, source_backup = primary, alternate
 
+    if migration:
+        require(observed_aboot is not None and observed_aboot == current_aboot_sha256(read, layout, progress),
+                '现有引导程序两次读取不一致，未写入')
+        require(gpt.gpt_digest(source_primary, source_backup) == migration['source_gpt_sha256'],
+                '原厂分区表与签名迁移包不匹配，未写入')
+        allowed_aboot = {migration['source_aboot_sha256']}
+        if restarting and phase == 'images':
+            allowed_aboot.add(target_aboot)
+    else:
+        allowed_aboot = {target_aboot}
+    require(observed_aboot in allowed_aboot, '现有引导程序未通过兼容核对，未写入')
+
     try:
         new_primary, new_backup, target, profile = ab_gpt.build(source_primary, source_backup, board['family'])
     except (storage_layout.LayoutError, gpt.GptError) as err:
         raise oneclick.FlashStopped(f'无法规划 A/B 分区，未写入：{err}') from None
     require(profile == manifest['profile_gb'], '刷机包容量档和棒子不一致')
-    steps = [partition_step(name, manifest['images'][name], target, pack_dir) for name in flashpack.AB_IMAGES]
+    image_names = flashpack.AB_IMAGES
+    if migration:
+        image_names = (*image_names[:-1], 'aboot', image_names[-1])
+    steps = [partition_step(name, manifest['images'][name], target, pack_dir) for name in image_names]
     if receipt.exists():
         require(frozen['target_gpt'] == target['gpt_sha256'], 'A/B 目标布局与安装记录不一致')
     if phase == 'prepare':
@@ -153,7 +170,8 @@ def run_session(pack_dir, manifest, phase, read, ep_out, ep_in, device,
         return result
 
     require(phase == 'images' and layout['gpt_sha256'] == target['gpt_sha256'], '当前 GPT 与冻结的 A/B 布局不符')
-    plan = oneclick._save_plan(folder, 'ab-images', target, steps, ab_layout=True)
+    standard_steps = [step for step in steps if step['target'] != 'aboot']
+    plan = oneclick._save_plan(folder, 'ab-images', target, standard_steps, ab_layout=True)
     # Read back every candidate before requesting a write. Every individual write
     # is checked again by the existing writer.
     remaining = [s for s in steps if not oneclick.already_written(read, s['segments'][0], progress)]
@@ -162,7 +180,10 @@ def run_session(pack_dir, manifest, phase, read, ep_out, ep_in, device,
         if step not in remaining:
             result['skipped'].append(name)
             continue
-        result['reports'].append(oneclick._run_plan_step(plan, step, read, ep_out, ep_in, flashpack.BLOCK,
+        step_plan = plan
+        if name == 'aboot':
+            step_plan = oneclick._save_plan(folder, 'ab-aboot', target, [step], ab_layout=True)
+        result['reports'].append(oneclick._run_plan_step(step_plan, step, read, ep_out, ep_in, flashpack.BLOCK,
                                                          log, progress, on_disk_sectors, tool_version, retry))
         result['written'].append(name)
     require(all(oneclick.already_written(read, step['segments'][0], progress) for step in steps),

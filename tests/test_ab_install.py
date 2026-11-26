@@ -92,7 +92,9 @@ def installable(tmp_path, monkeypatch):
     monkeypatch.setattr(storage_layout, 'PROFILES', {4: (4, 1, 1, 1, 1)})
     monkeypatch.setattr(storage_layout, 'capacity_profile', lambda value: 4)
     monkeypatch.setattr(flashpack, 'install_boot_ledger', lambda: bytes(8 * block))
-    disk = FakeDisk(DISK, source_parts(DISK, 1024, 2048, 64))
+    parts = [(name, start, start + block // gpt.SECTOR - 1 if name == 'aboot' else end)
+             for name, start, end in source_parts(DISK, 1024, 2048, 64)]
+    disk = FakeDisk(DISK, parts)
     old, tail = disk.read(0, gpt.PRIMARY_SECTORS), disk.read(DISK - gpt.BACKUP_SECTORS, gpt.BACKUP_SECTORS)
     disk.data[64 * 512:64 * 512 + 19] = b'UFI003_CT 20211210\0'
     source = gpt.parse_gpt(old, tail, DISK)
@@ -180,6 +182,38 @@ def test_signed_install_calibration_backup_then_verify_and_publish_boot_ledger(i
     with pytest.raises(oneclick.FlashStopped, match='重新初始化'):
         run(folder, disk, 'prepare')
 
+
+
+def test_signed_stock_migration_pins_source_and_activates_ledger_last(installable, tmp_path):
+    disk, folder, _ = installable
+    layout, _, _ = backup.read_layout(disk.read)
+    source = flashpack.check_imported(folder)
+    images = {name: folder / entry['file'] for name, entry in source['images'].items()}
+    aboot = next(row for row in layout['partitions'] if row['name'] == 'aboot')
+    aboot_image = tmp_path / 'aboot.img'
+    aboot_image.write_bytes(b'b' * aboot['bytes'])
+    images['aboot'] = aboot_image
+    migration = {'source_gpt_sha256': layout['gpt_sha256'],
+                 'source_aboot_sha256': source['aboot_sha256']}
+    pack = tmp_path / 'migration.rshpack'
+    flashpack.create_ab_pack(pack, 'A/B migration test', '2', 4,
+                             hashlib.sha256(aboot_image.read_bytes()).hexdigest(), images,
+                             tmp_path / 'signing.key', stock_migration=migration)
+    imported = flashpack.import_pack(pack)
+
+    start = aboot['first_sector'] * gpt.SECTOR
+    original_aboot = disk.read(aboot['first_sector'], aboot['sectors'])
+    disk.data[start] ^= 1
+    with pytest.raises(oneclick.FlashStopped, match='现有引导程序'):
+        run(imported, disk, 'prepare')
+    disk.data[start] ^= 1
+
+    assert run(imported, disk, 'prepare')['written'] == ['gpt']
+    assert disk.read(aboot['first_sector'], aboot['sectors']) == original_aboot
+    final = run(imported, disk, 'images')
+    assert final['written'][-3:] == ['boot', 'aboot', 'RSH_BOOTCTL']
+    assert disk.read(aboot['first_sector'], aboot['sectors']) == aboot_image.read_bytes()
+    assert final['done']
 
 
 def test_unstable_calibration_leaves_source_gpt_untouched(installable, monkeypatch):

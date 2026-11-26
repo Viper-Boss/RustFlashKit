@@ -147,3 +147,5 @@ powershell -ExecutionPolicy Bypass -File build.ps1   # 先跑测试，再生成 
 分支已接入格式 2 签名整机包。接收固件仓库生成的同源输入报告，使用 `ab-pack-create --verified-inputs <报告> --aboot-sha256 <兼容引导摘要> --key <私钥> --name <名称> --version <版本> --output <新包>` 在隔离构建环境签包。
 
 按已确认的 UFI003、可扩至 64 MiB 的 boot 和兼容 aboot 执行。先核对容量、备份基带 NV 和校准分区并回读验证、生成并核对主备 GPT，再按提示重新进入 9008 写入两个系统槽与共享分区，最后写启动账本。原有系统与用户数据会被清除。完整流程目前只通过模拟设备测试。
+
+已核对来源布局和原厂引导的设备可以另外指定 `--stock-source-gpt-sha256`、`--stock-source-aboot-sha256` 和 `--stock-aboot-image`。三个参数须同时提供。目标引导镜像须匹配 `--aboot-sha256`。工具会再次读取原厂引导并比对两个摘要，写入顺序为系统槽、boot、aboot、启动账本。
