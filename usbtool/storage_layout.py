@@ -81,7 +81,28 @@ def allocate(spans, size, name):
     return start, size
 
 
-def plan_layout(layout, board_family, image_bytes=None):
+def reserve_stock_boot(partitions, reclaim, boot_bytes):
+    boot = next(row for row in partitions if row["name"] == "boot")
+    if boot["bytes"] == boot_bytes:
+        return partitions
+    system = next((row for row in partitions if row["name"] == "system"), None)
+    last_sector = boot["first_sector"] + boot_bytes // SECTOR_BYTES - 1
+    if (reclaim != STOCK or boot["bytes"] != 16 * 1024 * 1024 or boot_bytes != 64 * 1024 * 1024
+            or system is None or system["first_sector"] != boot["last_sector"] + 1
+            or last_sector >= system["last_sector"]):
+        raise LayoutError("boot 扩容需要从相邻的原厂 Android system 分区回收空间")
+
+    reclaimed_sectors = last_sector - boot["last_sector"]
+    expanded_boot = dict(boot, last_sector=last_sector, bytes=boot_bytes,
+                         sectors=boot["sectors"] + reclaimed_sectors)
+    trimmed_system = dict(system, first_sector=last_sector + 1,
+                          bytes=system["bytes"] - reclaimed_sectors * SECTOR_BYTES,
+                          sectors=system["sectors"] - reclaimed_sectors)
+    resized = {"boot": expanded_boot, "system": trimmed_system}
+    return [resized.get(row["name"], row) for row in partitions]
+
+
+def plan_layout(layout, board_family, image_bytes=None, *, boot_bytes=None):
     """Plan extents only. Preserve reserved gaps, existing protected entries and table bounds."""
     if board_family != "UFI003":
         raise LayoutError("仅为已识别的 UFI003 规划")
@@ -100,6 +121,8 @@ def plan_layout(layout, board_family, image_bytes=None):
         raise LayoutError("未识别旧系统布局")
     if image_bytes is not None and (type(image_bytes) is not int or not 0 < image_bytes <= slot * MIB):
         raise LayoutError(f"固件镜像超过 {slot} MiB 槽容量或大小无效")
+    if boot_bytes is not None:
+        partitions = reserve_stock_boot(partitions, reclaim, boot_bytes)
     preserved = [row for row in partitions if row["name"] not in reclaim]
     if len(preserved) + len(TARGET) > layout["entry_count"]:
         # The accepted GPT envelope already reserves 32 sectors on each side.

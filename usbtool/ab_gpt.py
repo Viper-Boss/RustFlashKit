@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-only
-"""Derive an A/B GPT from a validated device GPT without moving preserved entries."""
+"""Derive an A/B GPT from a validated device GPT, expanding stock boot in place when possible."""
 import struct
 import uuid
 import zlib
@@ -15,13 +15,11 @@ def build(primary, backup, board):
     header = gpt.parse_header(primary[gpt.SECTOR:2 * gpt.SECTOR], 1)
     geometry = dict(source, first_usable=header["first_usable"], last_usable=header["last_usable"],
                     entry_count=header["count"])
-    if not any(p["name"] == "boot" and p["bytes"] == BOOT_BYTES for p in source["partitions"]):
-        raise storage_layout.LayoutError("A/B 安装需要原位 64 MiB boot 分区")
     if any(struct.unpack_from("<I", raw, offset)[0] != 92
            for raw, offset in ((primary, gpt.SECTOR + 12), (backup, len(backup) - gpt.SECTOR + 12))):
         raise storage_layout.LayoutError("A/B 安装需要已知 GPT 头格式")
 
-    plan = storage_layout.plan_layout(geometry, board)
+    plan = storage_layout.plan_layout(geometry, board, boot_bytes=BOOT_BYTES)
     entries = bytearray(32 * gpt.SECTOR)
 
     def row_slice(index):
@@ -36,6 +34,8 @@ def build(primary, backup, board):
             raise storage_layout.LayoutError("保留分区 GUID 重复或缺失")
         used_ids.add(unique)
         entries[span] = raw
+        if row["name"] == "boot":
+            struct.pack_into("<Q", entries, span.start + 40, row["last_sector"])
     namespace = uuid.UUID(bytes_le=header["disk_guid"])
     for row in plan["new_partitions"]:
         name = row["name"]

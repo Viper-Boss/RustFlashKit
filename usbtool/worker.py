@@ -11,7 +11,7 @@ import threading
 import time
 import traceback
 
-from . import backup, board_id, gpt, paths, policy, storage_layout
+from . import ab_gpt, backup, board_id, gpt, paths, policy, storage_layout
 
 PREFIX = '@@USBTOOL '
 ACTIONS = ('probe', 'backup', 'write', 'storage', 'flash')
@@ -181,7 +181,7 @@ def run(job, link_factory=None):
                     raise storage_layout.LayoutError('设备芯片与 MSM8916 不匹配')
                 geometry = dict(layout, first_usable=header['first_usable'], last_usable=header['last_usable'],
                                 entry_count=header['count'])
-                storage_plan = storage_layout.plan_layout(geometry, board['family'])
+                storage_plan = storage_layout.plan_layout(geometry, board['family'], boot_bytes=ab_gpt.BOOT_BYTES)
             except storage_layout.LayoutError as err:
                 warnings.append(f'A/B 规划暂不可用：{err}')
             emit('result', action='probe', device=device, layout=layout, board=board,

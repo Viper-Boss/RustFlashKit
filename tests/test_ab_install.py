@@ -47,6 +47,42 @@ def test_real_size_gpt_preserves_original_entries_and_both_gpt_copies(capacity, 
     assert new_rows['RSH_A'][16:32] != new_rows['RSH_B'][16:32]
 
 
+@pytest.mark.parametrize('usable', [True, False])
+def test_stock_boot_expansion_uses_only_adjacent_android_system(usable):
+    disk = 7634944
+    boot_start = 396384
+    boot_sectors = (16 << 20) // gpt.SECTOR
+    parts = source_parts(disk, boot_start, boot_sectors, 4096)
+    if usable:
+        system_start = boot_start + boot_sectors
+        parts = parts[:-4] + [
+            ('system', system_start, 2067551),
+            ('cache', 2133088, 2395231),
+            ('recovery', 2395232, 2427999),
+            ('userdata', 2428000, disk - gpt.BACKUP_SECTORS - 1),
+        ]
+    base, alternate = gpt.build_gpt(disk, parts)
+    if not usable:
+        with pytest.raises(storage_layout.LayoutError, match='boot 扩容需要'):
+            ab_gpt.build(base, alternate, 'UFI003')
+        return
+
+    primary, tail, target, profile = ab_gpt.build(base, alternate, 'UFI003')
+    assert profile == 4
+    assert gpt.parse_gpt(primary, tail, disk) == target
+    old_rows = writeplan.gpt_entries_by_name(base)
+    new_rows = writeplan.gpt_entries_by_name(primary)
+    assert not set(new_rows).intersection(storage_layout.STOCK)
+    for name, old_row in old_rows.items():
+        if name == 'boot':
+            assert new_rows[name][:40] == old_row[:40]
+            assert new_rows[name][48:] == old_row[48:]
+        elif name not in storage_layout.STOCK:
+            assert new_rows[name] == old_row
+    boot = next(row for row in target['partitions'] if row['name'] == 'boot')
+    assert (boot['first_sector'], boot['bytes']) == (boot_start, 64 << 20)
+
+
 @pytest.fixture
 def installable(tmp_path, monkeypatch):
     block = 16 * KIB
