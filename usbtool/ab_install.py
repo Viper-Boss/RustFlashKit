@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Initial A/B installation through the existing guarded Firehose writer.
 
-The first phase freezes a verified full-disk backup and the exact source/target
+The first phase freezes a verified calibration backup and the exact source/target
 GPTs. In the second phase, the device and both GPT copies must still match.
 Only a fully verified installation gets the final boot ledger.
 """
@@ -15,6 +15,7 @@ import shutil
 from . import ab_gpt, backup, board_id, flashpack, gpt, oneclick, paths, storage_layout, writeplan
 
 DISK_MARGIN = 200 << 20
+CALIBRATION_NAMES = frozenset({"modemst1", "modemst2", "fsc", "fsg", "sec", "persist"})
 
 
 def require(condition, reason):
@@ -22,12 +23,25 @@ def require(condition, reason):
         raise oneclick.FlashStopped(reason)
 
 
+def calibration_partitions(layout):
+    return {row['name']: row for row in layout['partitions'] if row['name'] in CALIBRATION_NAMES}
+
+
 def load_source(folder, disk):
     manifest, errors = backup.verify_backup(folder)
     require(not errors and manifest['layout']['disk_sectors'] == disk and manifest.get('reread_verified') is True,
-            '原盘备份未通过离线复核')
-    full = [item for item in manifest['items'] if item['name'] == backup.FULL_DISK]
-    require(len(full) == 1 and full[0]['bytes'] == disk * gpt.SECTOR, '必须有完整原盘备份')
+            '设备备份未通过离线复核')
+    items = manifest['items']
+    if len(items) == 1 and items[0]['name'] == backup.FULL_DISK:
+        require(items[0]['first_sector'] == 0 and items[0]['sectors'] == disk, '完整原盘备份的范围不一致')
+    else:
+        required = calibration_partitions(manifest['layout'])
+        require(required and len(required) == len(items) and set(required) == {item['name'] for item in items},
+                '设备备份缺少基带或校准分区')
+        for item in items:
+            source = required[item['name']]
+            require(all(item[field] == source[field] for field in ('first_sector', 'sectors', 'bytes')),
+                    f'备份范围与分区表不符：{item["name"]}')
     folder = Path(folder)
     return manifest, (folder/'gpt-primary.bin').read_bytes(), (folder/'gpt-backup.bin').read_bytes()
 
@@ -102,10 +116,11 @@ def run_session(pack_dir, manifest, phase, read, ep_out, ep_in, device,
         require(layout['gpt_sha256'] in (gpt.gpt_digest(source_primary, source_backup), target['gpt_sha256']),
                 '当前 GPT 和本次安装记录不匹配')
         if not receipt.exists():
-            needed = disk * gpt.SECTOR + sum(m['bytes'] for m in manifest['images'].values()) + DISK_MARGIN
-            require(shutil.disk_usage(paths.local_dir()).free >= needed, '备份及写前镜像所需磁盘空间不足')
+            calibration = calibration_partitions(layout)
+            needed = sum(row['bytes'] for row in calibration.values()) + DISK_MARGIN
+            require(shutil.disk_usage(paths.local_dir()).free >= needed, '校准备份所需磁盘空间不足')
             output = backup.new_backup_dir(paths.backups_dir())
-            original = backup.run_backup(read, output, [backup.FULL_DISK], reread=True, device=device,
+            original = backup.run_backup(read, output, list(calibration), reread=True, device=device,
                                          on_disk_sectors=on_disk_sectors, log=log, progress=progress)
             require(original['passed'] and original['layout']['gpt_sha256'] == layout['gpt_sha256'],
                     '备份期间分区表已变化')
@@ -118,9 +133,10 @@ def run_session(pack_dir, manifest, phase, read, ep_out, ep_in, device,
             result['skipped'].append('gpt')
         else:
             if restarting:
-                full = next(item for item in original['items'] if item['name'] == backup.FULL_DISK)
-                current = backup.hash_range(read, 0, disk, None, progress, '核对重新接上的原盘')
-                require(current == full['sha256'], '设备内容自原盘备份后变化，未写入')
+                for item in original['items']:
+                    current = backup.hash_range(read, item['first_sector'], item['sectors'], None, progress,
+                                                f'核对备份 {item["name"]}')
+                    require(current == item['sha256'], f'{item["name"]} 内容自备份后变化，未写入')
             segments = []
             for name, start, data in (('primary', 0, new_primary), ('backup', disk-gpt.BACKUP_SECTORS, new_backup)):
                 payload = folder / f'gpt-{name}.bin'
@@ -139,10 +155,8 @@ def run_session(pack_dir, manifest, phase, read, ep_out, ep_in, device,
     require(phase == 'images' and layout['gpt_sha256'] == target['gpt_sha256'], '当前 GPT 与冻结的 A/B 布局不符')
     plan = oneclick._save_plan(folder, 'ab-images', target, steps, ab_layout=True)
     # Read back every candidate before requesting a write. Every individual write
-    # is checked again by the existing writer and receives a fresh preimage.
+    # is checked again by the existing writer.
     remaining = [s for s in steps if not oneclick.already_written(read, s['segments'][0], progress)]
-    need = sum(s['segments'][0]['sectors'] * gpt.SECTOR for s in remaining) + DISK_MARGIN
-    require(shutil.disk_usage(paths.local_dir()).free >= need, '写前镜像所需磁盘空间不足')
     for step in steps:
         name = step['name']
         if step not in remaining:

@@ -160,9 +160,10 @@ def run_step(plan, step_name, confirm, reader, ep_out, ep_in, log=print, progres
         write_report(folder, report)
         raise WriteRefused('A/B 写入前保护区读数不一致，未写入')
 
-    # 3. 目标区前像（回退用证据）
+    # 3. 保存分区表和手动写入目标的前像供诊断。
     report['preimage'] = []
-    for i, seg in enumerate(segments):
+    save_preimage = not plan.get('_ab_layout') or step['target'] == 'gpt'
+    for i, seg in enumerate(segments if save_preimage else []):
         path = folder / f'preimage-{i}-{seg["first_sector"]}.bin'
         with open(path, 'xb') as sink:
             sha = backup.hash_range(reader, seg['first_sector'], seg['sectors'], sink, progress, f'前像 {seg["first_sector"]}')
@@ -204,8 +205,10 @@ def run_step(plan, step_name, confirm, reader, ep_out, ep_in, log=print, progres
     # 6. 目标区回读三次
     report['status'] = 'verifying'
     write_report(folder, report)
-    readback = [readback_against_payload(reader, seg, folder, progress, folder / pre['file'])
-                for seg, pre in zip(segments, report['preimage'])]
+    preimage_paths = [folder / pre['file'] for pre in report['preimage']]
+    readback = [readback_against_payload(reader, seg, folder, progress,
+                                        preimage_paths[i] if save_preimage else None)
+                for i, seg in enumerate(segments)]
     report['readback'] = readback
 
     # 7. 保护区写后核对

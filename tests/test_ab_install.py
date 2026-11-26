@@ -7,7 +7,7 @@ import pytest
 
 from conftest import FakeDisk
 from test_write import FakeTarget
-from usbtool import ab_gpt, backup, flashpack, gpt, oneclick, storage_layout, writeplan
+from usbtool import ab_gpt, ab_install, backup, flashpack, gpt, oneclick, storage_layout, writeplan
 
 DISK = 8192
 DEVICE = {'chip_ok': True, 'serial': 'aa1234', 'msm_id': '0x7050e1', 'loader_sha256': 'a' * 64}
@@ -145,19 +145,26 @@ def test_compressed_pack_must_match_signed_uncompressed_bytes(installable, tmp_p
     assert flashpack.import_pack(original).is_dir()
 
 
-def test_signed_install_full_backup_then_verify_and_publish_boot_ledger(installable):
+def test_signed_install_calibration_backup_then_verify_and_publish_boot_ledger(installable):
     disk, folder, target = installable
     source = bytes(disk.data)
     first = run(folder, disk, 'prepare')
     assert first['written'] == ['gpt'] and not first['done']
     saved, errors = backup.verify_backup(Path(first['backup']))
     assert not errors and saved['reread_verified']
-    assert (Path(first['backup'])/'full-disk.img').read_bytes() == source
+    expected = ab_install.calibration_partitions(saved['layout'])
+    assert {item['name'] for item in saved['items']} == set(expected)
+    for name, part in expected.items():
+        assert (Path(first['backup'])/f'{name}.img').read_bytes() == disk.read(part['first_sector'], part['sectors'])
+    assert not (Path(first['backup'])/'full-disk.img').exists()
+    assert not (Path(first['backup'])/'userdata.img').exists()
     with pytest.raises(oneclick.FlashStopped, match='先完成'):
         run(folder, disk, 'images', device=dict(DEVICE, serial='dead'))
     final = run(folder, disk, 'images')
     assert final['written'] == list(flashpack.AB_IMAGES)
     assert final['manual_reboot'] and final['done']
+    for report_dir in final['reports']:
+        assert not list(Path(report_dir).glob('preimage-*'))
     actual, _, _ = backup.read_layout(disk.read)
     assert actual == target
     for part in actual['partitions']:
@@ -173,6 +180,30 @@ def test_signed_install_full_backup_then_verify_and_publish_boot_ledger(installa
     with pytest.raises(oneclick.FlashStopped, match='重新初始化'):
         run(folder, disk, 'prepare')
 
+
+
+def test_unstable_calibration_leaves_source_gpt_untouched(installable, monkeypatch):
+    disk, folder, _ = installable
+    before = bytes(disk.data)
+    layout, _, _ = backup.read_layout(disk.read)
+    part = ab_install.calibration_partitions(layout)['modemst2']
+    read = disk.read
+    calls = 0
+
+    def unstable_read(start, count):
+        nonlocal calls
+        data = read(start, count)
+        if start == part['first_sector']:
+            calls += 1
+            if calls == 2:
+                return bytes([data[0] ^ 1]) + data[1:]
+        return data
+
+    monkeypatch.setattr(disk, 'read', unstable_read)
+    with pytest.raises(backup.BackupError, match='modemst2.*不一致'):
+        run(folder, disk, 'prepare')
+    assert calls == 2
+    assert bytes(disk.data) == before
 
 def test_failed_image_keeps_boot_ledger_and_refuses_unapproved_retry(installable):
     disk, folder, target = installable

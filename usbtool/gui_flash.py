@@ -96,8 +96,8 @@ class FlashTab:
             messagebox.showwarning('缺少加载器', '这个刷机包没有带加载器，请先在上方选择 Firehose 加载器')
             return
         if self.manifest.get('kind') == flashpack.AB_KIND:
-            notice = ('将重新初始化棒子的系统和数据分区。原有短信、通话记录和配置不会自动导入。\n'
-                      '工具会先备份并复核原盘。基带、NV、校准分区和 aboot 会保留。\n\n')
+            notice = ('将重新初始化棒子的系统和数据分区。原有短信、通话记录和配置将被清除。\n'
+                      '工具会先备份并复核基带 NV 和校准数据。\n\n')
         else:
             notice = ('会改写分区表、aboot、boot、NSHSTATE 和 rootfs，清除原来的安卓系统和数据。\n'
                       '写入前后都会核对基带、NV 和校准分区。\n\n')
