@@ -104,7 +104,8 @@ def install_boot_ledger():
 def validate_ab_manifest(manifest):
     fields = {'format', 'kind', 'name', 'version', 'board', 'profile_gb', 'images', 'aboot_sha256'}
     _require(set(manifest) in (fields, fields | {'stock_migration'})
-             and type(manifest['format']) is int and manifest['format'] == 2 and manifest['board'] == 'ufi003',
+             and type(manifest['format']) is int and manifest['format'] == 2
+             and isinstance(manifest['board'], str) and manifest['board'] in {'ufi003', 'ufi001c'},
              'A/B 包格式或板型无效')
     _require(all(isinstance(manifest[field], str) and 0 < len(manifest[field]) <= 128 for field in ('name', 'version')),
              'A/B 包缺少名称或版本')
@@ -170,8 +171,8 @@ def ab_pack_inputs(report):
     return result
 
 
-def create_ab_pack(output, name, version, profile, aboot_sha256, images, key_path, *, stock_migration=None):
-    manifest = {'format': 2, 'kind': AB_KIND, 'name': name, 'version': version, 'board': 'ufi003',
+def create_ab_pack(output, name, version, profile, aboot_sha256, images, key_path, *, stock_migration=None, board="ufi003"):
+    manifest = {'format': 2, 'kind': AB_KIND, 'name': name, 'version': version, 'board': board,
                 'profile_gb': profile, 'aboot_sha256': aboot_sha256, 'images': {
                     label: {'file': f'{label}.img', 'sha256': _sha256(path), 'bytes': os.path.getsize(path)}
                     for label, path in images.items()

@@ -191,6 +191,7 @@ def main(argv):
     ab.add_argument('--version', required=True)
     ab.add_argument('--key', required=True)
     ab.add_argument('--aboot-sha256', required=True)
+    ab.add_argument('--board', choices=('ufi003', 'ufi001c'), default='ufi003')
     ab.add_argument('--verified-inputs', type=Path, required=True, help='固件构建器输出的 A/B 输入报告')
     ab.add_argument('--stock-source-gpt-sha256', help='迁移时核对的原厂主备 GPT 摘要')
     ab.add_argument('--stock-source-aboot-sha256', help='迁移时核对的原厂 aboot 摘要')
@@ -259,7 +260,7 @@ def main(argv):
                 ledger.write_bytes(flashpack.install_boot_ledger())
                 images['RSH_BOOTCTL'] = ledger
                 flashpack.create_ab_pack(args.output, args.name, args.version, inputs['profile_gb'], args.aboot_sha256,
-                                         images, args.key, stock_migration=migration)
+                                         images, args.key, stock_migration=migration, board=args.board)
         except (OSError, ValueError) as err:
             print(f'错误：{err}', file=sys.stderr)
             return 1

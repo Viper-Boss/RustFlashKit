@@ -82,7 +82,8 @@ def run_session(pack_dir, manifest, phase, read, ep_out, ep_in, device,
     layout, primary, alternate = backup.read_layout(read, on_disk_sectors)
     disk = layout['disk_sectors']
     board = board_id.identify(read, layout, progress)
-    require(board['family'] == 'UFI003', '无法确认 UFI003 型号，未写入')
+    expected_board = manifest['board'].upper()
+    require(board['family'] == expected_board, f'刷机包需要 {expected_board}，实际为 {board_id.describe(board)}，未写入')
     migration = manifest.get('stock_migration') or {}
     accept_unstable = migration.get('unstable_calibration', ())
     if accept_unstable:

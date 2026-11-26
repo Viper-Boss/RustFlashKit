@@ -236,6 +236,26 @@ def test_signed_stock_migration_pins_device_and_activates_ledger_last(installabl
     assert final['done']
 
 
+
+def test_ufi001c_requires_matching_signed_a_b_pack(installable, tmp_path):
+    disk, folder, _ = installable
+    before = bytes(disk.data)
+    modem_offset = 64 * gpt.SECTOR
+    disk.data[modem_offset:modem_offset + 20] = b'UFI001CT 20211106\0'.ljust(20, b'\0')
+    changed_modem = bytes(disk.data)
+    with pytest.raises(oneclick.FlashStopped, match='刷机包需要 UFI003'):
+        run(folder, disk, 'prepare')
+    assert bytes(disk.data) == changed_modem and before != changed_modem
+
+    manifest = flashpack.check_imported(folder)
+    images = {name: folder / entry['file'] for name, entry in manifest['images'].items()}
+    pack = tmp_path / 'ufi001c.rshpack'
+    flashpack.create_ab_pack(pack, 'UFI001C A/B', '3', 4, manifest['aboot_sha256'], images,
+                             tmp_path / 'signing.key', board='ufi001c')
+    imported = flashpack.import_pack(pack)
+    assert run(imported, disk, 'prepare')['written'] == ['gpt']
+    assert run(imported, disk, 'images')['done']
+
 def test_unstable_calibration_leaves_source_gpt_untouched(installable, monkeypatch):
     disk, folder, _ = installable
     before = bytes(disk.data)
