@@ -18,6 +18,7 @@ from . import gpt_plan, paths, storage_layout
 
 KIND = 'rustsimhub-flashpack'
 AB_KIND = 'rustsimhub-ab-flashpack'
+CALIBRATION_EXCEPTIONS = frozenset({'modemst2', 'persist'})
 AB_IMAGES = ('RSH_A', 'RSH_B', 'RSH_RECORDS', 'RSH_CONFIG', 'RSH_ABUSE', 'RSH_KEYS', 'RSH_AUDIO', 'boot', 'RSH_BOOTCTL')
 
 IMAGES = ('aboot', 'boot', 'NSHSTATE', 'rootfs')  # 写入顺序
@@ -115,9 +116,16 @@ def validate_ab_manifest(manifest):
     labels = set(AB_IMAGES)
     if 'stock_migration' in manifest:
         migration = manifest['stock_migration']
-        _require(isinstance(migration, dict) and set(migration) == {'source_gpt_sha256', 'source_aboot_sha256'}
-                 and all(isinstance(value, str) and HEX64.fullmatch(value) for value in migration.values())
+        digests = {'source_gpt_sha256', 'source_aboot_sha256'}
+        _require(isinstance(migration, dict) and set(migration) in (digests, digests | {'device_serial', 'unstable_calibration'})
+                 and all(isinstance(migration[key], str) and HEX64.fullmatch(migration[key]) for key in digests)
                  and migration['source_aboot_sha256'] != pin, '原厂引导迁移摘要无效')
+        if 'unstable_calibration' in migration:
+            serial, names = migration['device_serial'], migration['unstable_calibration']
+            _require(isinstance(serial, str) and re.fullmatch('[0-9a-f]{1,32}', serial)
+                     and isinstance(names, list) and 0 < len(names) <= len(CALIBRATION_EXCEPTIONS)
+                     and all(isinstance(name, str) and name in CALIBRATION_EXCEPTIONS for name in names)
+                     and len(set(names)) == len(names), '校准备份例外必须绑定设备和分区')
         labels.add('aboot')
     _require(isinstance(images, dict) and set(images) == labels, 'A/B 包的镜像列表不完整或包含未知分区')
     slot, records, config, abuse, keys = storage_layout.PROFILES[profile]
@@ -128,9 +136,10 @@ def validate_ab_manifest(manifest):
         _require(entry['file'] == f'{label}.img' and isinstance(entry['sha256'], str)
                  and HEX64.fullmatch(entry['sha256']), f'{label} 文件名或摘要无效')
         size = entry['bytes']
-        _require(type(size) is int and size > 0 and size % storage_layout.MIB == 0, f'{label} 长度无效')
+        alignment = BLOCK if label == 'aboot' else storage_layout.MIB
+        _require(type(size) is int and size > 0 and size % alignment == 0, f'{label} 长度无效')
         if label == 'aboot':
-            _require(size == storage_layout.MIB and entry['sha256'] == pin, '引导迁移镜像与目标摘要不匹配')
+            _require(size <= (1 << 20) and entry['sha256'] == pin, '引导迁移镜像与目标摘要不匹配')
         elif label in exact_mib:
             _require(size == exact_mib[label] * storage_layout.MIB, f'{label} 镜像大小不匹配')
         else:

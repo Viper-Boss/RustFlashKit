@@ -3,6 +3,7 @@
 
 结果状态：
 - verified：三次回读都等于载荷，读得稳的保护扇区全部未变，GPT 摘要符合预期；
+- verified_with_calibration_exception：载荷和 GPT 验证通过，签名包标记的校准区读数存在例外；
 - written_unprovable：写入与回读都对，但有保护扇区本来就读不稳，无法证明它们未变；
 - readback_mismatch / protected_changed / gpt_mismatch：写入后核对失败；
 - write_failed：写入过程中失败（可能已部分写入）。
@@ -155,7 +156,11 @@ def run_step(plan, step_name, confirm, reader, ep_out, ep_in, log=print, progres
                                    'sha256_read1': a[0], 'sha256_read2': b[0], 'stable': a[0] == b[0]}
                                   for r, (a, b) in zip(protected, pre)]
 
-    if plan.get('_ab_layout') and not all(row['stable'] for row in report['protected_before']):
+    accept_unstable = set(plan.get('unstable_calibration', ()))
+    if accept_unstable:
+        report['accepted_unstable_calibration'] = sorted(accept_unstable)
+    if plan.get('_ab_layout') and any(not row['stable'] and row['name'] not in accept_unstable
+                                      for row in report['protected_before']):
         report['status'] = 'protected_unstable'
         write_report(folder, report)
         raise WriteRefused('A/B 写入前保护区读数不一致，未写入')
@@ -228,16 +233,19 @@ def run_step(plan, step_name, confirm, reader, ep_out, ep_in, log=print, progres
         wrong = [r for r in readback if not r['majority_ok']]
         # 写错的扇区读出来全是写入前的旧内容：设备回了 ACK 但没有写入
         report['status'] = 'not_written' if all(r['looks_unwritten'] for r in wrong) else 'readback_mismatch'
-    elif any(r['changed_sectors'] for r in results):
+    elif any(r['changed_sectors'] for r in results if r['name'] not in accept_unstable):
         report['status'] = 'protected_changed'
     elif new_layout['gpt_sha256'] != expected_gpt:
         report['status'] = 'gpt_mismatch'
     elif not all(r['ok'] for r in readback):
         report['status'] = 'written_majority'  # 每个扇区多数回读等于载荷，但有读数在跳；不算通过
-    elif any(r['unprovable_sectors'] for r in results):
+    elif any(r['unprovable_sectors'] for r in results if r['name'] not in accept_unstable):
         report['status'] = 'written_unprovable'
     else:
-        report['status'] = 'verified'
+        has_calibration_differences = any(
+            r['changed_sectors'] or r['unstable_sectors']
+            for r in results if r['name'] in accept_unstable)
+        report['status'] = 'verified_with_calibration_exception' if has_calibration_differences else 'verified'
         report['passed'] = True
     write_report(folder, report)
     log(f'结果：{report["status"]}（未自动重启设备）')

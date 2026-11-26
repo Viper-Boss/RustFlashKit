@@ -92,9 +92,7 @@ def installable(tmp_path, monkeypatch):
     monkeypatch.setattr(storage_layout, 'PROFILES', {4: (4, 1, 1, 1, 1)})
     monkeypatch.setattr(storage_layout, 'capacity_profile', lambda value: 4)
     monkeypatch.setattr(flashpack, 'install_boot_ledger', lambda: bytes(8 * block))
-    parts = [(name, start, start + block // gpt.SECTOR - 1 if name == 'aboot' else end)
-             for name, start, end in source_parts(DISK, 1024, 2048, 64)]
-    disk = FakeDisk(DISK, parts)
+    disk = FakeDisk(DISK, source_parts(DISK, 1024, 2048, 64))
     old, tail = disk.read(0, gpt.PRIMARY_SECTORS), disk.read(DISK - gpt.BACKUP_SECTORS, gpt.BACKUP_SECTORS)
     disk.data[64 * 512:64 * 512 + 19] = b'UFI003_CT 20211210\0'
     source = gpt.parse_gpt(old, tail, DISK)
@@ -184,22 +182,27 @@ def test_signed_install_calibration_backup_then_verify_and_publish_boot_ledger(i
 
 
 
-def test_signed_stock_migration_pins_source_and_activates_ledger_last(installable, tmp_path):
+def test_signed_stock_migration_pins_device_and_activates_ledger_last(installable, tmp_path, monkeypatch):
     disk, folder, _ = installable
     layout, _, _ = backup.read_layout(disk.read)
     source = flashpack.check_imported(folder)
     images = {name: folder / entry['file'] for name, entry in source['images'].items()}
     aboot = next(row for row in layout['partitions'] if row['name'] == 'aboot')
     aboot_image = tmp_path / 'aboot.img'
-    aboot_image.write_bytes(b'b' * aboot['bytes'])
+    aboot_image.write_bytes(b'b' * flashpack.BLOCK)
     images['aboot'] = aboot_image
+    source_prefix = disk.read(aboot['first_sector'], flashpack.BLOCK // gpt.SECTOR)
     migration = {'source_gpt_sha256': layout['gpt_sha256'],
-                 'source_aboot_sha256': source['aboot_sha256']}
+                 'source_aboot_sha256': hashlib.sha256(source_prefix).hexdigest(),
+                 'device_serial': DEVICE['serial'], 'unstable_calibration': ['modemst2']}
     pack = tmp_path / 'migration.rshpack'
     flashpack.create_ab_pack(pack, 'A/B migration test', '2', 4,
                              hashlib.sha256(aboot_image.read_bytes()).hexdigest(), images,
                              tmp_path / 'signing.key', stock_migration=migration)
     imported = flashpack.import_pack(pack)
+
+    with pytest.raises(oneclick.FlashStopped, match='不适用于该棒子'):
+        run(imported, disk, 'prepare', device=dict(DEVICE, serial='dead'))
 
     start = aboot['first_sector'] * gpt.SECTOR
     original_aboot = disk.read(aboot['first_sector'], aboot['sectors'])
@@ -208,11 +211,28 @@ def test_signed_stock_migration_pins_source_and_activates_ledger_last(installabl
         run(imported, disk, 'prepare')
     disk.data[start] ^= 1
 
-    assert run(imported, disk, 'prepare')['written'] == ['gpt']
-    assert disk.read(aboot['first_sector'], aboot['sectors']) == original_aboot
+    calibration = ab_install.calibration_partitions(layout)['modemst2']
+    reader = disk.read
+    calls = 0
+
+    def unstable_read(first, count):
+        nonlocal calls
+        data = reader(first, count)
+        if first == calibration['first_sector']:
+            calls += 1
+            return bytes([data[0] ^ (calls % 2)]) + data[1:]
+        return data
+
+    monkeypatch.setattr(disk, 'read', unstable_read)
+    prepared = run(imported, disk, 'prepare')
+    assert prepared['written'] == ['gpt']
+    assert backup.verify_backup(prepared['backup'])[1]
+    assert not backup.verify_backup(prepared['backup'], accept_unstable={'modemst2'})[1]
+    assert reader(aboot['first_sector'], aboot['sectors']) == original_aboot
     final = run(imported, disk, 'images')
     assert final['written'][-3:] == ['boot', 'aboot', 'RSH_BOOTCTL']
-    assert disk.read(aboot['first_sector'], aboot['sectors']) == aboot_image.read_bytes()
+    expected = aboot_image.read_bytes() + original_aboot[flashpack.BLOCK:]
+    assert disk.read(aboot['first_sector'], aboot['sectors']) == expected
     assert final['done']
 
 

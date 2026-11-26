@@ -27,8 +27,8 @@ def calibration_partitions(layout):
     return {row['name']: row for row in layout['partitions'] if row['name'] in CALIBRATION_NAMES}
 
 
-def load_source(folder, disk):
-    manifest, errors = backup.verify_backup(folder)
+def load_source(folder, disk, accept_unstable=()):
+    manifest, errors = backup.verify_backup(folder, accept_unstable=accept_unstable)
     require(not errors and manifest['layout']['disk_sectors'] == disk and manifest.get('reread_verified') is True,
             '设备备份未通过离线复核')
     items = manifest['items']
@@ -55,8 +55,8 @@ def freeze_receipt(path, contents):
 
 def partition_step(name, info, layout, pack_dir):
     part = next(p for p in layout['partitions'] if p['name'] == name)
-    if name == 'RSH_AUDIO':
-        require(info['bytes'] <= part['bytes'], '录音文件系统种子大于目标分区')
+    if name in {'RSH_AUDIO', 'aboot'}:
+        require(info['bytes'] <= part['bytes'], f'{name} 镜像大于目标分区')
     else:
         require(info['bytes'] == part['bytes'], f'{name} 镜像和设备规划大小不一致')
     return {'name': name, 'target': name, 'expected_gpt_sha256': layout['gpt_sha256'],
@@ -64,11 +64,14 @@ def partition_step(name, info, layout, pack_dir):
                           'payload': str((Path(pack_dir)/info['file']).resolve()), 'sha256': info['sha256']}]}
 
 
-def current_aboot_sha256(read, layout, progress):
+def current_aboot_sha256(read, layout, progress, sectors=None):
     part = next((p for p in layout['partitions'] if p['name'] == 'aboot'), None)
     if part is None:
         return None
-    return backup.hash_range(read, part['first_sector'], part['sectors'], None, progress, '核对现有引导程序')
+    if sectors is None:
+        sectors = part['sectors']
+    require(0 < sectors <= part['sectors'], '签名指定的引导镜像大于当前分区')
+    return backup.hash_range(read, part['first_sector'], sectors, None, progress, '核对现有引导程序')
 
 
 def run_session(pack_dir, manifest, phase, read, ep_out, ep_in, device,
@@ -80,8 +83,14 @@ def run_session(pack_dir, manifest, phase, read, ep_out, ep_in, device,
     disk = layout['disk_sectors']
     board = board_id.identify(read, layout, progress)
     require(board['family'] == 'UFI003', '无法确认 UFI003 型号，未写入')
-    observed_aboot = current_aboot_sha256(read, layout, progress)
-    migration = manifest.get('stock_migration')
+    migration = manifest.get('stock_migration') or {}
+    accept_unstable = migration.get('unstable_calibration', ())
+    if accept_unstable:
+        require(serial.lower() == migration['device_serial'], '校准备份例外不适用于该棒子，未写入')
+    aboot_sectors = None
+    if migration:
+        aboot_sectors = manifest['images']['aboot']['bytes'] // gpt.SECTOR
+    observed_aboot = current_aboot_sha256(read, layout, progress, aboot_sectors)
     target_aboot = manifest['aboot_sha256']
     folder = oneclick.work_dir(pack_dir) / f'ab-{serial.lower()}'
     folder.mkdir(exist_ok=True)
@@ -96,7 +105,7 @@ def run_session(pack_dir, manifest, phase, read, ep_out, ep_in, device,
         frozen = json.loads(receipt.read_text(encoding='utf-8'))
         require((frozen['pack_sha256'], frozen['serial'], frozen['loader']) == (pack_sha, serial.lower(), loader),
                 '此备份属于不同的棒子、加载器或签名包')
-        original, source_primary, source_backup = load_source(frozen['backup'], disk)
+        original, source_primary, source_backup = load_source(frozen['backup'], disk, accept_unstable)
         saved_device = original['device']
         require(str(saved_device.get('serial', '')).lower() == serial.lower()
                 and saved_device.get('loader_sha256') == loader, '原盘备份属于不同设备或加载器')
@@ -107,7 +116,7 @@ def run_session(pack_dir, manifest, phase, read, ep_out, ep_in, device,
         source_primary, source_backup = primary, alternate
 
     if migration:
-        require(observed_aboot is not None and observed_aboot == current_aboot_sha256(read, layout, progress),
+        require(observed_aboot is not None and observed_aboot == current_aboot_sha256(read, layout, progress, aboot_sectors),
                 '现有引导程序两次读取不一致，未写入')
         require(gpt.gpt_digest(source_primary, source_backup) == migration['source_gpt_sha256'],
                 '原厂分区表与签名迁移包不匹配，未写入')
@@ -138,10 +147,11 @@ def run_session(pack_dir, manifest, phase, read, ep_out, ep_in, device,
             require(shutil.disk_usage(paths.local_dir()).free >= needed, '校准备份所需磁盘空间不足')
             output = backup.new_backup_dir(paths.backups_dir())
             original = backup.run_backup(read, output, list(calibration), reread=True, device=device,
-                                         on_disk_sectors=on_disk_sectors, log=log, progress=progress)
+                                         on_disk_sectors=on_disk_sectors, log=log, progress=progress,
+                                         accept_unstable=accept_unstable)
             require(original['passed'] and original['layout']['gpt_sha256'] == layout['gpt_sha256'],
                     '备份期间分区表已变化')
-            load_source(output, disk)
+            load_source(output, disk, accept_unstable)
             frozen = {'backup': str(output), 'serial': serial.lower(), 'loader': loader, 'pack_sha256': pack_sha,
                       'source_gpt': layout['gpt_sha256'], 'target_gpt': target['gpt_sha256']}
             freeze_receipt(receipt, frozen)
@@ -151,6 +161,8 @@ def run_session(pack_dir, manifest, phase, read, ep_out, ep_in, device,
         else:
             if restarting:
                 for item in original['items']:
+                    if item['name'] in accept_unstable:
+                        continue
                     current = backup.hash_range(read, item['first_sector'], item['sectors'], None, progress,
                                                 f'核对备份 {item["name"]}')
                     require(current == item['sha256'], f'{item["name"]} 内容自备份后变化，未写入')
@@ -162,7 +174,7 @@ def run_session(pack_dir, manifest, phase, read, ep_out, ep_in, device,
                                  'payload': payload.name, 'sha256': hashlib.sha256(data).hexdigest()})
             step = {'name': 'gpt', 'target': 'gpt', 'expected_gpt_sha256': layout['gpt_sha256'],
                     'expected_gpt_after_sha256': target['gpt_sha256'], 'segments': segments}
-            plan = oneclick._save_plan(folder, 'ab-gpt', layout, [step], ab_layout=True)
+            plan = oneclick._save_plan(folder, 'ab-gpt', layout, [step], ab_layout=True, aboot_sectors=aboot_sectors, accept_unstable=accept_unstable)
             result['reports'].append(oneclick._run_plan_step(plan, step, read, ep_out, ep_in, gpt.SECTOR,
                                                              log, progress, on_disk_sectors, tool_version, retry))
             result['written'].append('gpt')
@@ -171,7 +183,8 @@ def run_session(pack_dir, manifest, phase, read, ep_out, ep_in, device,
 
     require(phase == 'images' and layout['gpt_sha256'] == target['gpt_sha256'], '当前 GPT 与冻结的 A/B 布局不符')
     standard_steps = [step for step in steps if step['target'] != 'aboot']
-    plan = oneclick._save_plan(folder, 'ab-images', target, standard_steps, ab_layout=True)
+    plan = oneclick._save_plan(folder, 'ab-images', target, standard_steps, ab_layout=True,
+                              aboot_sectors=aboot_sectors, accept_unstable=accept_unstable)
     # Read back every candidate before requesting a write. Every individual write
     # is checked again by the existing writer.
     remaining = [s for s in steps if not oneclick.already_written(read, s['segments'][0], progress)]
@@ -182,7 +195,8 @@ def run_session(pack_dir, manifest, phase, read, ep_out, ep_in, device,
             continue
         step_plan = plan
         if name == 'aboot':
-            step_plan = oneclick._save_plan(folder, 'ab-aboot', target, [step], ab_layout=True)
+            step_plan = oneclick._save_plan(folder, 'ab-aboot', target, [step], ab_layout=True,
+                                           accept_unstable=accept_unstable)
         result['reports'].append(oneclick._run_plan_step(step_plan, step, read, ep_out, ep_in, flashpack.BLOCK,
                                                          log, progress, on_disk_sectors, tool_version, retry))
         result['written'].append(name)

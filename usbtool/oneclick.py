@@ -38,7 +38,7 @@ def protected_ranges(layout):
             for p in layout['partitions'] if p['name'].lower() in names]
 
 
-def _save_plan(folder, name, layout, steps, *, ab_layout=False):
+def _save_plan(folder, name, layout, steps, *, ab_layout=False, aboot_sectors=None, accept_unstable=()):
     if ab_layout:
         from .storage_layout import TARGET, NATIVE, STOCK
         image_targets = TARGET | NATIVE | STOCK | {'boot'}
@@ -46,9 +46,15 @@ def _save_plan(folder, name, layout, steps, *, ab_layout=False):
             image_targets = image_targets | {'aboot'}
         protected = [{'name': p['name'], 'first_sector': p['first_sector'], 'sectors': p['sectors']}
                      for p in layout['partitions'] if p['name'] not in image_targets]
+        if aboot_sectors is not None:
+            for item in protected:
+                if item['name'] == 'aboot':
+                    item['sectors'] = aboot_sectors
     else:
         protected = protected_ranges(layout)
     plan = {'format': 1, 'kind': 'usbtool-write-plan', 'description': name, 'protected': protected, 'steps': steps}
+    if ab_layout and accept_unstable:
+        plan['unstable_calibration'] = sorted(accept_unstable)
     path = folder / f'{name}-plan.json'
     path.write_text(json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
     return writeplan.load_plan(path, ab_layout=ab_layout)
@@ -114,7 +120,7 @@ def _run_plan_step(plan, step, read, ep_out, ep_in, payload_size, log, progress,
     report, folder = write_runner.run_step(plan, step['name'], digest, read, ep_out, ep_in, log=log, progress=progress,
                                            on_disk_sectors=on_disk_sectors, tool_version=tool_version,
                                            preconfigured_payload=payload_size)
-    if report['status'] != 'verified':
+    if not report['passed']:
         raise FlashStopped(f'{step["name"]} 写入后核对未通过（{report["status"]}），已停止。报告：{folder}')
     return str(folder)
 

@@ -51,7 +51,15 @@ def load_plan(path, *, ab_layout=False):
     plan = json.loads(raw.decode('utf-8'))
     _require(isinstance(plan, dict) and plan.get('format') == 1 and plan.get('kind') == 'usbtool-write-plan',
              '不是受支持的写入计划（需要 format=1、kind=usbtool-write-plan）')
-    _require(set(plan) <= {'format', 'kind', 'description', 'protected', 'steps'}, '计划含有未知字段')
+    fields = {'format', 'kind', 'description', 'protected', 'steps'}
+    if ab_layout:
+        fields.add('unstable_calibration')
+    _require(set(plan) <= fields, '计划含有未知字段')
+    if 'unstable_calibration' in plan:
+        from .flashpack import CALIBRATION_EXCEPTIONS
+        names = plan['unstable_calibration']
+        _require(isinstance(names, list) and all(isinstance(name, str) and name in CALIBRATION_EXCEPTIONS for name in names),
+                 '未知校准例外分区')
     _require(isinstance(plan.get('steps'), list) and plan['steps'], '计划没有步骤')
     _require(isinstance(plan.get('protected'), list) and plan['protected'], '计划没有保护区段')
     names = set()

@@ -165,7 +165,7 @@ def best_effort_image(reader, folder, partial, filename, start, differing):
 
 
 def run_backup(reader, folder, names, reread=True, progress=None, device=None, on_disk_sectors=None, log=print,
-               vote=False, keep_reads=False):
+               vote=False, keep_reads=False, *, accept_unstable=()):
     """备份到全新目录 folder。names 为分区名列表，可含 FULL_DISK。失败时保留 .partial 文件和清单供检查。"""
     folder = pathlib.Path(folder)
     if any(folder.iterdir()):
@@ -220,8 +220,11 @@ def run_backup(reader, folder, names, reread=True, progress=None, device=None, o
                     item['best_effort'] = best_effort_image(reader, folder, partial, filename, start, differing)
                 write_manifest(folder, manifest)
                 hint = '，已另存多数表决的尽力而为镜像（未验证）' if item.get('best_effort') else ''
-                raise BackupError(f'{name} 两次从设备读取的内容不一致：{total} 个扇区不同{hint}。'
-                                  '可能是存储芯片读不稳，此备份不能作为可信的写前备份')
+                if name not in accept_unstable:
+                    raise BackupError(f'{name} 两次从设备读取的内容不一致：{total} 个扇区不同{hint}。'
+                                      '可能是存储芯片读不稳，此备份不能作为可信的写前备份')
+                item['status'] = 'accepted_unstable'
+                log(f'{name} 有 {total} 个扇区读数不一致，保留第一遍镜像并标记为未验证')
         if name == FULL_DISK:
             with open(partial, 'rb') as stream:
                 if stream.read(len(primary)) != primary:
@@ -230,14 +233,15 @@ def run_backup(reader, folder, names, reread=True, progress=None, device=None, o
                 if stream.read() != backup:
                     raise BackupError('全盘镜像中的备份 GPT 与单独读取的不一致')
         os.replace(partial, folder / filename)
-        item['status'] = 'verified'
+        if item['status'] != 'accepted_unstable':
+            item['status'] = 'verified'
         write_manifest(folder, manifest)
     manifest['passed'] = True
     write_manifest(folder, manifest)
     return manifest
 
 
-def verify_backup(folder):
+def verify_backup(folder, *, accept_unstable=()):
     """离线复核一个备份目录：清单完整、GPT 文件与清单一致、每个镜像长度与摘要一致。返回 (manifest, errors)。"""
     folder = pathlib.Path(folder)
     errors = []
@@ -258,7 +262,8 @@ def verify_backup(folder):
         errors.append(f'GPT 文件校验失败：{err}')
     for item in manifest.get('items', []):
         path = folder / item.get('file', '')
-        if item.get('status') != 'verified':
+        accepted = item.get('status') == 'accepted_unstable' and item.get('name') in accept_unstable
+        if item.get('status') != 'verified' and not accepted:
             errors.append(f'{item.get("name")} 未完成校验（{item.get("status")}）')
             continue
         if not path.is_file() or path.stat().st_size != item.get('bytes'):
