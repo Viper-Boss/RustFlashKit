@@ -2,7 +2,7 @@ name: Windows A/B preview release
 
 on:
   push:
-    branches: [codex/ufi003-stock-ab-install]
+    branches: [codex/ufi001c-ab-install]
     paths: [.github/workflows/windows-preview.yml]
 
 permissions:
@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 25
     env:
       PYTHONUTF8: "1"
-      RELEASE_TAG: v0.1.0-ab-preview.5
+      RELEASE_TAG: v0.1.0-ab-preview.6
       EDL_COMMIT: 1cda1a616748d608667b2d13b73a28d3197ceb45
       EDL_SHA256: 00c50cf6eda58d1e2c47092f699f0eec6ca4e6f1e9b915db9e9a68db038286c5
     defaults:
@@ -96,7 +96,7 @@ jobs:
           @'
           Windows x64 源码编译预览。包含图形版、命令行版、SHA256 校验文件及配套 EDL 源码。
 
-          本版识别 UFI003 和容量，预览 4 GB/8 GB A/B 分区，并能连接支持串口协议的运行中固件。签名整机包支持从匹配的 UFI003 原厂布局安装 A/B，包括原地扩容 boot 和迁移原厂引导。刷机前备份基带 NV 和校准分区。
+          本版识别 UFI003、UFI001C 和容量，预览 4 GB/8 GB A/B 分区，并能连接支持串口协议的运行中固件。签名整机包支持从签名包匹配的设备布局安装 A/B，包括原地扩容 boot 和迁移原厂引导。刷机前备份基带 NV 和校准分区。
 
           4 GB 两个根槽各为 608 MiB。录音文件系统写入 64 MiB 后可随实际分区扩容。
 
@@ -104,5 +104,5 @@ jobs:
 
           9008 模式需自行选择适配的 Firehose 加载器。
           '@ | Set-Content -Encoding utf8 release-notes.md
-          gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --prerelease --latest=false --title 'RustSimHub USB 工具 · A/B 预览 5' --notes-file release-notes.md dist/RustSimHub-UsbTool.exe dist/RustSimHub-UsbTool-cli.exe SHA256SUMS.txt "edl-source-$env:EDL_COMMIT.tar.gz"
+          gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --prerelease --latest=false --title 'RustSimHub USB 工具 · A/B 预览 6' --notes-file release-notes.md dist/RustSimHub-UsbTool.exe dist/RustSimHub-UsbTool-cli.exe SHA256SUMS.txt "edl-source-$env:EDL_COMMIT.tar.gz"
           if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }
