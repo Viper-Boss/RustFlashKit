@@ -5,18 +5,21 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import stat
 import struct
 import uuid
 import zipfile
 import zlib
 
-from . import gpt, gpt_plan
+from . import backup, gpt, gpt_plan
 
 STOCK_TZ_SECTORS = 1024
 ARM64_TZ_SECTORS = 2048
 TZ_TYPE = uuid.UUID('a053aa7f-40b8-4b1c-ba08-2f68ac71a4f4').bytes_le
 CDT_TYPE = uuid.UUID('a19f205f-ccd8-4b6d-8f1e-2d9bc24cffb1').bytes_le
 CDT_SECTORS = 4
+# Matches the CDT entry in the OpenStick v1 base and base-generic GPTs.
+CDT_ATTRIBUTES = 1 << 60
 OPENSTICK_PAYLOADS = {
     'sbl1': ('sbl1.mbn', 524288, '6565a3c61c0f7413f10f1027c7f9b085335aeaabc379338c37c57917ac90c4aa'),
     'rpm': ('rpm.mbn', 524288, '551beae07ab831204c8d8362d2344c37b03ba6bd590984eb44b7f560ee6b94b7'),
@@ -66,7 +69,7 @@ def build(primary, alternate, backup_start, cdt_start):
     cdt_offset = (cdt_index - 1) * 128
     cdt_guid = uuid.uuid5(uuid.UUID(bytes_le=header['disk_guid']), 'RustSimHub UFI001C CDT').bytes_le
     require(all(table[(i - 1) * 128 + 16:(i - 1) * 128 + 32] != cdt_guid for i in indexes), 'CDT GUID 冲突')
-    table[cdt_offset:cdt_offset + 128] = (CDT_TYPE + cdt_guid + struct.pack('<QQQ', cdt_start, cdt_last, 0)
+    table[cdt_offset:cdt_offset + 128] = (CDT_TYPE + cdt_guid + struct.pack('<QQQ', cdt_start, cdt_last, CDT_ATTRIBUTES)
                                           + 'cdt'.encode('utf-16-le').ljust(72, b'\0'))
     crc = zlib.crc32(table[:header['count'] * 128])
 
@@ -106,6 +109,53 @@ def stage_payloads(archive_path, layout):
     return staged
 
 
+def rollback_ranges(source, candidate, staged):
+    """Cover every planned write with original GPT, partition or blank-space bytes."""
+    disk = source['disk_sectors']
+    original = {row['name']: row for row in source['partitions']}
+    target = {row['name']: row for row in candidate['partitions']}
+    ranges = {
+        'gpt-primary': (0, gpt.PRIMARY_SECTORS, False),
+        'gpt-backup': (disk - gpt.BACKUP_SECTORS, gpt.BACKUP_SECTORS, False),
+    }
+    future_locations = {'tzbak', 'cdt'}
+    writes = [(0, gpt.PRIMARY_SECTORS), (disk - gpt.BACKUP_SECTORS, gpt.BACKUP_SECTORS)]
+    for payload, names, _ in staged.values():
+        for name in names:
+            dest = target[name]
+            writes.append((dest['first_sector'], len(payload) // gpt.SECTOR))
+            if name in original:
+                part = original[name]
+                ranges[name] = (part['first_sector'], part['sectors'], False)
+            if name in future_locations:
+                ranges[f'gap-{name}'] = (dest['first_sector'], dest['sectors'], True)
+    ordered = sorted(ranges.values())
+    for (start, count, _), (following, _, _) in zip(ordered, ordered[1:]):
+        require(start + count <= following, '回退区段重叠')
+    for first, count in writes:
+        end = first
+        for start, length, _ in ordered:
+            if start <= end < start + length:
+                end = start + length
+        require(end >= first + count, f'回退数据未覆盖可能的写入区段 {first}+{count}')
+    return {name: {'first_sector': first, 'sectors': count, 'must_be_zero': blank}
+            for name, (first, count, blank) in ranges.items()}
+
+
+def verify_preimages(read, ranges, original_primary, original_alternate):
+    """Collect stable preimages through the same sector reader used by EDL."""
+    captured = {name: backup.checked_read(read, row['first_sector'], row['sectors'])
+                for name, row in ranges.items()}
+    require(captured['gpt-primary'] == original_primary and captured['gpt-backup'] == original_alternate,
+            '本次回读的主备 GPT 与迁移来源不一致')
+    for name, row in ranges.items():
+        data = captured[name]
+        require(data == backup.checked_read(read, row['first_sector'], row['sectors']), f'{name} 两次读取不一致')
+        if row['must_be_zero']:
+            require(data == bytes(len(data)), f'{name} 内有数据')
+    return captured
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('primary', type=Path)
@@ -114,21 +164,46 @@ def main():
     parser.add_argument('cdt_start', type=int)
     parser.add_argument('output', type=Path)
     parser.add_argument('--openstick-base', type=Path, help='OpenStick v1 base.zip 或 base-generic.zip')
+    parser.add_argument('--check-disk-image', type=Path, help='从普通磁盘镜像双读回退区段并保存副本')
     args = parser.parse_args()
-    primary, alternate, report = build(args.primary.read_bytes(), args.alternate.read_bytes(),
-                                       args.backup_start, args.cdt_start)
+    original_primary, original_alternate = args.primary.read_bytes(), args.alternate.read_bytes()
+    primary, alternate, report = build(original_primary, original_alternate, args.backup_start, args.cdt_start)
     staged = {}
+    captured = {}
     if args.openstick_base is not None:
-        layout = gpt.parse_gpt(primary, alternate, gpt.disk_sectors_from_primary(primary))
+        disk = gpt.disk_sectors_from_primary(primary)
+        source = gpt.parse_gpt(original_primary, original_alternate, disk)
+        layout = gpt.parse_gpt(primary, alternate, disk)
         staged = stage_payloads(args.openstick_base, layout)
         report['payloads'] = {name: {'file': name + '.candidate.bin', 'targets': targets, 'source_sha256': digest,
                                      'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
                               for name, (data, targets, digest) in staged.items()}
+        report['rollback_ranges'] = rollback_ranges(source, layout, staged)
+    if args.check_disk_image is not None:
+        if not staged:
+            parser.error('--check-disk-image 需要 --openstick-base')
+        image = args.check_disk_image
+        require(stat.S_ISREG(image.stat().st_mode) and image.stat().st_size == disk * gpt.SECTOR,
+                '需要与来源容量相同的常规磁盘镜像文件')
+        with image.open('rb') as stream:
+            def read(start, count):
+                stream.seek(start * gpt.SECTOR)
+                return stream.read(count * gpt.SECTOR)
+
+            captured = verify_preimages(read, report['rollback_ranges'], original_primary, original_alternate)
+        report['disk_image_preimages'] = {name: {'file': 'image-preimages/' + name + '.bin',
+                                               'sha256': hashlib.sha256(data).hexdigest()}
+                                         for name, data in captured.items()}
     args.output.mkdir(mode=0o700)
     (args.output / 'gpt-primary.candidate.bin').write_bytes(primary)
     (args.output / 'gpt-backup.candidate.bin').write_bytes(alternate)
     for name, (data, _, _) in staged.items():
         (args.output / (name + '.candidate.bin')).write_bytes(data)
+    if captured:
+        folder = args.output / 'image-preimages'
+        folder.mkdir(mode=0o700)
+        for name, data in captured.items():
+            (folder / (name + '.bin')).write_bytes(data)
     (args.output / 'preflight.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
 
 

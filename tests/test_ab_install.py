@@ -173,6 +173,7 @@ def test_ufi001c_arm64_chain_layout_preserves_unrelated_entries(monkeypatch):
     assert (proof['candidate']['cdt']['first_sector'], proof['candidate']['cdt']['last_sector']) == (6210, 6213)
     after = writeplan.gpt_entries_by_name(new_primary)
     assert after['cdt'][:16] == ufi001c_chain_layout.CDT_TYPE
+    assert int.from_bytes(after['cdt'][48:56], 'little') == 1 << 60
     for name, row in original.items():
         if name in {'tz', 'tzbak'}:
             assert after[name][:32] == row[:32] and after[name][48:] == row[48:]
@@ -198,6 +199,48 @@ def test_ufi001c_chain_stages_only_pinned_payloads_that_fit(tmp_path, monkeypatc
         archive.writestr('base/tz.mbn', bytes(len(payload)))
     with pytest.raises(gpt.GptError, match='文件摘要不匹配'):
         ufi001c_chain_layout.stage_payloads(archive_path, layout)
+
+
+def test_ufi001c_chain_rollback_restores_reused_and_new_sectors(monkeypatch):
+    parts = [('sbl1', 64, 127), ('aboot', 128, 191), ('boot', 192, 255), ('hyp', 256, 319),
+             ('tz', 512, 1535), ('tzbak', 1536, 2559), ('modemst1', 6144, 6207)]
+    disk = FakeDisk(DISK, parts)
+    original, primary, alternate = backup.read_layout(disk.read)
+    monkeypatch.setattr(ufi001c_chain_layout, 'TZ_TYPE', writeplan.gpt_entries_by_name(primary)['tz'][:16])
+    candidate, candidate_alt, _ = ufi001c_chain_layout.build(primary, alternate, 4096, 6210)
+    target = gpt.parse_gpt(candidate, candidate_alt, DISK)
+    staged = {'tz': (b'T' * (1183 * gpt.SECTOR), ('tz', 'tzbak'), ''),
+              'cdt': (b'C' * gpt.SECTOR, ('cdt',), '')}
+    ranges = ufi001c_chain_layout.rollback_ranges(original, target, staged)
+
+    with pytest.raises(gpt.GptError, match='gap-tzbak 内有数据'):
+        ufi001c_chain_layout.verify_preimages(disk.read, ranges, primary, alternate)
+    for row in ranges.values():
+        if row['must_be_zero']:
+            start = row['first_sector'] * gpt.SECTOR
+            disk.data[start:start + row['sectors'] * gpt.SECTOR] = bytes(row['sectors'] * gpt.SECTOR)
+    disk.flaky = {ranges['tz']['first_sector']: {disk.sector_reads.get(ranges['tz']['first_sector'], 0) + 2}}
+    with pytest.raises(gpt.GptError, match='tz 两次读取不一致'):
+        ufi001c_chain_layout.verify_preimages(disk.read, ranges, primary, alternate)
+    disk.flaky.clear()
+    with pytest.raises(gpt.GptError, match='GPT.*不一致'):
+        ufi001c_chain_layout.verify_preimages(disk.read, ranges, candidate, candidate_alt)
+    preimages = ufi001c_chain_layout.verify_preimages(disk.read, ranges, primary, alternate)
+    before = bytes(disk.data)
+
+    def overwrite(first, data):
+        start = first * gpt.SECTOR
+        disk.data[start:start + len(data)] = data
+
+    for payload, names, _ in staged.values():
+        for part in target['partitions']:
+            if part['name'] in names:
+                overwrite(part['first_sector'], payload)
+    overwrite(DISK - gpt.BACKUP_SECTORS, candidate_alt)
+    overwrite(0, candidate)
+    for name, data in reversed(preimages.items()):
+        overwrite(ranges[name]['first_sector'], data)
+    assert bytes(disk.data) == before
 
 
 def test_compressed_pack_must_match_signed_uncompressed_bytes(installable, tmp_path, monkeypatch):
