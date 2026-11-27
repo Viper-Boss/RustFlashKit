@@ -1,24 +1,30 @@
-name: Windows A/B preview release
+name: Windows A/B preview
 
 on:
   push:
     branches: [codex/ufi001c-ab-install]
-    paths: [.github/workflows/windows-preview.yml]
+    tags: ['v*-ab-preview.*']
+    paths:
+      - .github/workflows/windows-preview.yml
+      - build.ps1
+      - requirements.txt
+      - run_usbtool.py
+      - 'usbtool/**'
+      - 'tests/**'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: windows-ab-preview-release
   cancel-in-progress: false
 
 jobs:
-  release:
+  build:
     runs-on: windows-2025
     timeout-minutes: 25
     env:
       PYTHONUTF8: "1"
-      RELEASE_TAG: v0.1.0-ab-preview.6
       EDL_COMMIT: 1cda1a616748d608667b2d13b73a28d3197ceb45
       EDL_SHA256: 00c50cf6eda58d1e2c47092f699f0eec6ca4e6f1e9b915db9e9a68db038286c5
     defaults:
@@ -82,6 +88,14 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or -not ($check -match 'libusb：可用')) {
               throw 'Packaged CLI self-check or Windows libusb check failed'
           }
+          $preflightHelp = & .\dist\RustSimHub-UsbTool-cli.exe chain-preflight --help
+          if ($LASTEXITCODE -ne 0 -or -not ($preflightHelp -match '--baseline')) {
+              throw 'Packaged CLI is missing chain-preflight'
+          }
+          $migrationHelp = & .\dist\RustSimHub-UsbTool-cli.exe chain-migrate --help
+          if ($LASTEXITCODE -ne 0 -or -not ($migrationHelp -match '--readback')) {
+              throw 'Packaged CLI is missing chain-migrate'
+          }
           $exe = Get-ChildItem .\dist\*.exe
           if ($exe.Count -ne 2) { throw 'Expected two executables' }
           $files = @($exe) + @(Get-Item "edl-source-$env:EDL_COMMIT.tar.gz")
@@ -89,9 +103,32 @@ jobs:
               "$((Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($file.Name)"
           }
           $hashes | Set-Content -Encoding ascii SHA256SUMS.txt
+      - name: Upload Windows build for verification
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-ab-preview
+          if-no-files-found: error
+          compression-level: 0
+          path: |
+            dist/*.exe
+            SHA256SUMS.txt
+            edl-source-${{ env.EDL_COMMIT }}.tar.gz
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: windows-2025
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-ab-preview
       - name: Publish pre-release
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           @'
           Windows x64 源码编译预览。包含图形版、命令行版、SHA256 校验文件及配套 EDL 源码。
@@ -104,5 +141,6 @@ jobs:
 
           9008 模式需自行选择适配的 Firehose 加载器。
           '@ | Set-Content -Encoding utf8 release-notes.md
-          gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --prerelease --latest=false --title 'RustSimHub USB 工具 · A/B 预览 6' --notes-file release-notes.md dist/RustSimHub-UsbTool.exe dist/RustSimHub-UsbTool-cli.exe SHA256SUMS.txt "edl-source-$env:EDL_COMMIT.tar.gz"
+          $source = (Get-ChildItem -File edl-source-*.tar.gz).FullName
+          gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --verify-tag --prerelease --latest=false --title "RustSimHub USB 工具 · $env:RELEASE_TAG" --notes-file release-notes.md dist/RustSimHub-UsbTool.exe dist/RustSimHub-UsbTool-cli.exe SHA256SUMS.txt $source
           if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }
