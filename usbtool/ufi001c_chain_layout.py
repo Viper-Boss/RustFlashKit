@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+from io import BytesIO
 import json
 from pathlib import Path
 import stat
@@ -11,7 +12,7 @@ import uuid
 import zipfile
 import zlib
 
-from . import backup, gpt, gpt_plan
+from . import backup, firehose_write, gpt, gpt_plan
 
 STOCK_TZ_SECTORS = 1024
 ARM64_TZ_SECTORS = 2048
@@ -162,8 +163,8 @@ def verify_preimages(read, ranges, original_primary, original_alternate):
     return captured
 
 
-def verify_9008(link, candidate_folder, baseline_folder, archive, output):
-    """Rebuild the candidate from pinned inputs, then verify and save live preimages."""
+def load_candidate(candidate_folder, baseline_folder, archive):
+    """Rebuild the candidate and derive the exact source bytes from pinned inputs."""
     original_primary = (baseline_folder / 'target-gpt-primary.bin').read_bytes()
     original_alternate = (baseline_folder / 'target-gpt-backup.bin').read_bytes()
     primary = (candidate_folder / 'gpt-primary.candidate.bin').read_bytes()
@@ -181,14 +182,26 @@ def verify_9008(link, candidate_folder, baseline_folder, archive, output):
         require((candidate_folder / (name + '.candidate.bin')).read_bytes() == data, f'{name} 候选镜像与原始输入不一致')
     ranges = rollback_ranges(source, candidate, staged)
     require(all(row['sectors'] <= ARM64_TZ_SECTORS for row in ranges.values()), '回读区段长度超出当前板型范围')
-    require(not output.exists(), '现场回读目录已存在')
-
-    baseline = {name: (baseline_folder / (name + '.bin')).read_bytes()
-                for name, row in ranges.items() if not row['must_be_zero'] and not name.startswith('gpt-')}
+    baseline = {'gpt-primary': original_primary, 'gpt-backup': original_alternate}
+    for name, row in ranges.items():
+        if name not in baseline:
+            baseline[name] = (bytes(row['sectors'] * gpt.SECTOR) if row['must_be_zero'] else
+                              (baseline_folder / (name + '.bin')).read_bytes())
     require(all(len(data) == ranges[name]['sectors'] * gpt.SECTOR for name, data in baseline.items()),
             '原始引导镜像长度与对应分区不一致')
-    link.set_disk_sectors(disk)
-    captured = verify_preimages(link.read, ranges, original_primary, original_alternate)
+    transitioned = transition_images(ranges, baseline, candidate, staged, primary, alternate)
+    return ranges, baseline, transitioned, {
+        'disk_sectors': disk, 'source_gpt_sha256': source['gpt_sha256'],
+        'candidate_gpt_sha256': candidate['gpt_sha256'],
+    }
+
+
+def verify_9008(link, candidate_folder, baseline_folder, archive, output, device):
+    """Verify and save live preimages in a read-only session."""
+    ranges, baseline, _, identity = load_candidate(candidate_folder, baseline_folder, archive)
+    require(not output.exists(), '现场回读目录已存在')
+    link.set_disk_sectors(identity['disk_sectors'])
+    captured = verify_preimages(link.read, ranges, baseline['gpt-primary'], baseline['gpt-backup'])
     for name, data in baseline.items():
         require(captured[name] == data, f'{name} 实机引导镜像与所存副本不一致')
 
@@ -200,10 +213,10 @@ def verify_9008(link, candidate_folder, baseline_folder, archive, output):
         digest = hashlib.sha256(data).hexdigest()
         require(backup.file_sha256(path) == digest, f'{name} 本地回读文件摘要不一致')
         items[name] = dict(ranges[name], file=path.name, sha256=digest)
-    backup.write_manifest(output, {'kind': 'ufi001c-9008-read-only-preflight',
-                                   'source_gpt_sha256': source['gpt_sha256'],
-                                   'candidate_gpt_sha256': candidate['gpt_sha256'],
-                                   'items': items, 'writes_performed': False, 'hardware_boot_verified': False})
+    backup.write_manifest(output, dict(identity, kind='ufi001c-9008-read-only-preflight',
+                                       device=device, items=items, writes_performed=False,
+                                       hardware_boot_verified=False))
+    return backup.file_sha256(output / backup.MANIFEST)
 
 
 def transition_images(ranges, captured, candidate, staged, primary, alternate):
@@ -266,6 +279,52 @@ def pending_transition(read, ranges, captured, candidate_images, *, restore=Fals
         pending.append(({'first_sector': first, 'sectors': count, 'sha256': hashlib.sha256(desired[name]).hexdigest()},
                         desired[name]))
     return pending
+
+
+def verify_receipt(readback, confirm):
+    raw = (readback / backup.MANIFEST).read_bytes()
+    require(hashlib.sha256(raw).hexdigest() == confirm, '回读清单摘要与确认不一致')
+    return json.loads(raw)
+
+
+def migrate_9008(link, candidate_folder, baseline_folder, archive, readback, confirm, output,
+                 device, *, restore=False, log=print, progress=None):
+    """Use only the board-bound, rederived ranges. Do not reset out of EDL."""
+    receipt = verify_receipt(readback, confirm)
+    ranges, baseline, transitioned, identity = load_candidate(candidate_folder, baseline_folder, archive)
+    require(receipt.get('kind') == 'ufi001c-9008-read-only-preflight'
+            and receipt.get('device') == device and bool(device.get('serial'))
+            and all(receipt.get(key) == value for key, value in identity.items()),
+            '现场回读属于不同的棒子、加载器或候选布局')
+    for name, data in baseline.items():
+        expected = dict(ranges[name], file=name + '.bin', sha256=hashlib.sha256(data).hexdigest())
+        require(receipt.get('items', {}).get(name) == expected and (readback / expected['file']).read_bytes() == data,
+                f'{name} 的现场回退文件未通过复核')
+    link.set_disk_sectors(identity['disk_sectors'])
+    pending = pending_transition(link.read, ranges, baseline, transitioned, restore=restore)
+    output.mkdir(mode=0o700)
+    report = {'kind': 'ufi001c-9008-chain-transition', 'direction': 'restore' if restore else 'apply', 'status': 'pending',
+              'preflight_sha256': confirm, 'segments': [seg for seg, _ in pending], 'verified_segments': [],
+              'hardware_boot_verified': False}
+    backup.write_manifest(output, report)
+    try:
+        if pending:
+            log(f'核对通过，将有序写入 {len(pending)} 段')
+            out, inp = link.endpoints()
+            session = firehose_write.WriteSession(out, inp, report['segments'], log=log, progress=progress,
+                                                    preconfigured_payload=gpt.SECTOR)
+            for seg, data in pending:
+                session.program_next(BytesIO(data))
+                require(backup.checked_read(link.read, seg['first_sector'], seg['sectors']) == data, '写入后回读不一致')
+                report['verified_segments'].append(seg['first_sector'])
+                backup.write_manifest(output, report)
+        require(not pending_transition(link.read, ranges, baseline, transitioned, restore=restore), '最终双读不一致')
+        report['status'] = 'verified'
+    except Exception as err:
+        report.update(status='stopped', error=str(err))
+        raise
+    finally:
+        backup.write_manifest(output, report)
 
 
 def main():

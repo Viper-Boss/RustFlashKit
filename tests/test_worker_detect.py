@@ -7,7 +7,8 @@ import zipfile
 import pytest
 
 from conftest import FakeDisk
-from usbtool import backup, cli, detect, gpt, policy, ufi001c_chain_layout, worker, writeplan
+from test_write import FakeTarget
+from usbtool import backup, cli, detect, firehose_write, gpt, policy, ufi001c_chain_layout, worker, writeplan
 
 
 class FakeLink:
@@ -72,7 +73,7 @@ def test_failed_backup_does_not_reset(disk, loader, tmp_path):
     assert link.resets == 0 and link.closed
 
 
-def test_chain_preflight_cli_saves_only_matching_readbacks(loader, tmp_path, monkeypatch):
+def test_chain_migration_cli_requires_matching_readbacks_and_verifies_both_directions(loader, tmp_path, monkeypatch):
     disk = FakeDisk(8192, [('sbl1', 64, 127), ('aboot', 128, 191), ('boot', 192, 255), ('hyp', 256, 319),
                            ('tz', 512, 1535), ('tzbak', 1536, 2559)])
     disk.data[4096 * 512:6148 * 512] = bytes(2052 * 512)
@@ -100,15 +101,25 @@ def test_chain_preflight_cli_saves_only_matching_readbacks(loader, tmp_path, mon
     monkeypatch.setitem(policy.KNOWN_LOADERS, backup.file_sha256(loader), 'test')
     monkeypatch.setattr(detect, 'usb_candidates', lambda: [{'port': '1-2'}])
     links = []
+    serial = 'aa12'
+    fault = None
 
     def connect(*args, **kwargs):
-        assert 'write_payload' not in kwargs
         link = FakeLink(disk)
+        link.device_info = lambda: dict(FakeLink.device_info(link), serial=serial)
+        chunk = kwargs.get('write_payload')
+        if chunk is not None:
+            assert chunk == 512
+            target = FakeTarget(disk)
+            target.out.write(firehose_write.configure_xml(chunk))
+            target.inp.read(4096)
+            target.fault = fault
+            link.endpoints = lambda: (target.out, target.inp)
         links.append(link)
         return link
 
     def run_job(job, timeout):
-        assert timeout == cli.PROBE_TIMEOUT
+        assert timeout == (cli.PROBE_TIMEOUT if job['action'] == 'chain-preflight' else None)
         worker.run(job, link_factory=connect)
         return 0
 
@@ -132,6 +143,33 @@ def test_chain_preflight_cli_saves_only_matching_readbacks(loader, tmp_path, mon
     assert receipt['writes_performed'] is False and receipt['hardware_boot_verified'] is False
     assert receipt['items']['gap-tzbak']['must_be_zero']
     assert receipt['items']['tz']['sha256'] == backup.file_sha256(baseline / 'tz.bin')
+
+    before = bytes(disk.data)
+    digest = backup.file_sha256(output / 'manifest.json')
+
+    def migrate(direction, folder, confirm=digest):
+        return cli.main(['chain-migrate', direction, *args[1:-2], '--output', str(tmp_path / folder),
+                         '--readback', str(output), '--confirm', confirm])
+
+    connections = len(links)
+    with pytest.raises(gpt.GptError, match='摘要与确认不一致'):
+        migrate('apply', 'bad-digest', '0' * 64)
+    assert len(links) == connections
+    serial = 'bb34'
+    with pytest.raises(gpt.GptError, match='不同的棒子'):
+        migrate('apply', 'other-device')
+    assert bytes(disk.data) == before
+    serial = 'aa12'
+    fault = 'final_nak'
+    with pytest.raises(firehose_write.WriteFailed):
+        migrate('apply', 'lost-ack')
+    assert json.loads((tmp_path / 'lost-ack/manifest.json').read_text())['status'] == 'stopped'
+    fault = None
+    assert migrate('apply', 'resume') == 0
+    assert backup.read_layout(disk.read)[1:] == (new_primary, new_alternate)
+    assert migrate('restore', 'undo') == 0
+    assert bytes(disk.data) == before
+    assert all(link.closed and link.resets == 0 for link in links)
 
 
 def test_unknown_loader_refused_without_confirmation(disk, loader):

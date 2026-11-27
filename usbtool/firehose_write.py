@@ -130,8 +130,9 @@ class WriteSession:
         self.index = 0
         self.chunk = chunk_size(self.segments)
         if preconfigured_payload is not None:
-            if preconfigured_payload != self.chunk:
-                self.fail(f'连接时配置的块大小 {preconfigured_payload} 与本步需要的 {self.chunk} 不同')
+            if not 512 <= preconfigured_payload <= self.chunk or self.chunk % preconfigured_payload:
+                self.fail(f'连接时配置的块大小 {preconfigured_payload} 不适用于本步（最大 {self.chunk}）')
+            self.chunk = preconfigured_payload
             self.transcript.append({'phase': 'configured', 'step': 'configure', 'max_payload': self.chunk,
                                     'note': '连接时已发送唯一一次 configure（SkipWrite=0）'})
             self.phase = 'configured'

@@ -6,6 +6,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import threading
@@ -15,7 +16,7 @@ import traceback
 from . import ab_gpt, backup, board_id, gpt, paths, policy, storage_layout
 
 PREFIX = '@@USBTOOL '
-ACTIONS = ('probe', 'backup', 'write', 'storage', 'flash', 'chain-preflight')
+ACTIONS = ('probe', 'backup', 'write', 'storage', 'flash', 'chain-preflight', 'chain-migrate')
 # 看门狗时限（秒）：连接阶段为整体上限；读取阶段为“多久没有任何进展”的上限。
 CONNECT_LIMIT = 90
 STALL_LIMIT = 120
@@ -58,7 +59,8 @@ class Watchdog:
     @staticmethod
     def expire(phase, limit):
         hint = MISSED_HELLO_HINT if phase == 'connect' else '读取停滞，设备可能已断开或卡住。'
-        emit('error', message=f'{phase} 阶段超过 {limit} 秒没有进展，已停止。{hint}未写入设备，未自动重试。')
+        state = '写入状态需重新回读核对。' if phase == 'chain-migrate' else '未写入设备。'
+        emit('error', message=f'{phase} 阶段超过 {limit} 秒没有进展，已停止。{hint}{state}未自动重试。')
         os._exit(WATCHDOG_EXIT)
 
 
@@ -115,11 +117,15 @@ def validate_job(job):
             raise ValueError('写入任务不允许自动重启设备')
         if not all(isinstance(job.get(k), str) and job.get(k) for k in ('plan', 'step', 'confirm')):
             raise ValueError('写入任务需要计划文件、步骤名和确认摘要')
-    if job['action'] == 'chain-preflight':
+    if job['action'] in ('chain-preflight', 'chain-migrate'):
         if job['mode'] != 'usb' or job.get('reset_after') or job.get('allow_unknown_loader'):
-            raise ValueError('UFI001C 引导链回读仅使用已知加载器的 USB 只读会话')
+            raise ValueError('UFI001C 引导链操作需要已知加载器和 USB 方式')
         if not all(isinstance(job.get(k), str) and job[k] for k in ('candidate', 'baseline', 'openstick_base', 'output')):
             raise ValueError('引导链回读需要候选目录、原始回读目录、OpenStick 基础包和输出目录')
+        if job['action'] == 'chain-migrate' and (job.get('direction') not in ('apply', 'restore')
+                or not isinstance(job.get('readback'), str) or not job['readback']
+                or not isinstance(job.get('confirm'), str) or not re.fullmatch(r'[0-9a-f]{64}', job['confirm'])):
+            raise ValueError('引导链写入需要方向、现场回读目录和完整清单摘要')
 
 
 def run(job, link_factory=None):
@@ -145,6 +151,11 @@ def run(job, link_factory=None):
     elif job['action'] == 'flash':
         link = link_factory(job['loader'], job['mode'], job.get('port', ''), log=lambda m: emit('log', message=m),
                             write_payload=job['chunk'])
+    elif job['action'] == 'chain-migrate':
+        from . import ufi001c_chain_layout
+        ufi001c_chain_layout.verify_receipt(Path(job['readback']), job['confirm'])
+        link = link_factory(job['loader'], job['mode'], job.get('port', ''), log=lambda m: emit('log', message=m),
+                            write_payload=gpt.SECTOR)
     else:
         link = link_factory(job['loader'], job['mode'], job.get('port', ''), log=lambda m: emit('log', message=m))
     if WATCHDOG is not None:
@@ -176,13 +187,21 @@ def run(job, link_factory=None):
         elif job['action'] == 'storage':
             from . import emmc_life
             emit('result', action='storage', report=emmc_life.from_firehose(link.storage_info()))
-        elif job['action'] == 'chain-preflight':
+        elif job['action'] in ('chain-preflight', 'chain-migrate'):
             from . import ufi001c_chain_layout
-            if device.get('chip_ok') is not True:
-                raise ValueError('未通过本次 Sahara 核对 MSM8916 芯片型号，停止回读')
-            ufi001c_chain_layout.verify_9008(link, Path(job['candidate']), Path(job['baseline']),
-                                           Path(job['openstick_base']), Path(job['output']))
-            emit('result', action='chain-preflight', folder=job['output'])
+            if device.get('chip_ok') is not True or not re.fullmatch(r'[0-9a-fA-F]{1,32}', device.get('serial') or ''):
+                raise ValueError('未通过本次 Sahara 核对 MSM8916 芯片型号和序列号，停止操作')
+            inputs = [Path(job[k]) for k in ('candidate', 'baseline', 'openstick_base')]
+            if job['action'] == 'chain-preflight':
+                confirm = ufi001c_chain_layout.verify_9008(link, *inputs, Path(job['output']), device)
+                emit('result', action='chain-preflight', folder=job['output'], digest=confirm)
+            else:
+                if WATCHDOG is not None:
+                    WATCHDOG.arm('chain-migrate', STALL_LIMIT)
+                ufi001c_chain_layout.migrate_9008(link, *inputs, Path(job['readback']), job['confirm'],
+                                                 Path(job['output']), device, restore=job['direction'] == 'restore',
+                                                 log=lambda m: emit('log', message=m), progress=progress)
+                emit('result', action='chain-migrate', folder=job['output'])
         elif job['action'] == 'probe':
             layout, primary, _backup = backup.read_layout(link.read, link.set_disk_sectors)
             header = gpt.parse_header(primary[gpt.SECTOR:2 * gpt.SECTOR], 1)
