@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-only
 import hashlib
+from io import BytesIO
 from pathlib import Path
 import zipfile
 
@@ -7,7 +8,7 @@ import pytest
 
 from conftest import FakeDisk
 from test_write import FakeTarget
-from usbtool import ab_gpt, ab_install, backup, flashpack, gpt, oneclick, storage_layout, ufi001c_chain_layout, writeplan
+from usbtool import ab_gpt, ab_install, backup, firehose_write, flashpack, gpt, oneclick, storage_layout, ufi001c_chain_layout, writeplan
 
 DISK = 8192
 DEVICE = {'chip_ok': True, 'serial': 'aa1234', 'msm_id': '0x7050e1', 'loader_sha256': 'a' * 64}
@@ -240,6 +241,64 @@ def test_ufi001c_chain_rollback_restores_reused_and_new_sectors(monkeypatch):
     overwrite(0, candidate)
     for name, data in reversed(preimages.items()):
         overwrite(ranges[name]['first_sector'], data)
+    assert bytes(disk.data) == before
+
+
+def test_ufi001c_chain_resumes_or_reverts_after_firehose_completion_is_lost(monkeypatch):
+    parts = [('sbl1', 64, 127), ('sbl1bak', 128, 191), ('aboot', 192, 255), ('boot', 256, 319),
+             ('hyp', 320, 383), ('tz', 512, 1535), ('tzbak', 1536, 2559), ('modemst1', 6176, 6239)]
+    disk = FakeDisk(DISK, parts)
+    disk.data[4096 * 512:6148 * 512] = bytes(2052 * 512)
+    original, primary, alternate = backup.read_layout(disk.read)
+    monkeypatch.setattr(ufi001c_chain_layout, 'TZ_TYPE', writeplan.gpt_entries_by_name(primary)['tz'][:16])
+    new_primary, new_alternate, _ = ufi001c_chain_layout.build(primary, alternate, 4096, 6144)
+    candidate = gpt.parse_gpt(new_primary, new_alternate, DISK)
+    staged = {'sbl1': (b'S' * (64 * 512), ('sbl1', 'sbl1bak'), ''),
+              'tz': (b'T' * (1183 * 512), ('tz', 'tzbak'), ''), 'cdt': (b'C' * 512, ('cdt',), '')}
+    ranges = ufi001c_chain_layout.rollback_ranges(original, candidate, staged)
+    captured = ufi001c_chain_layout.verify_preimages(disk.read, ranges, primary, alternate)
+    images = ufi001c_chain_layout.transition_images(ranges, captured, candidate, staged, new_primary, new_alternate)
+    before = bytes(disk.data)
+
+    def pending(restore=False):
+        return ufi001c_chain_layout.pending_transition(disk.read, ranges, captured, images, restore=restore)
+
+    def send(batch, fail_at=None):
+        target = FakeTarget(disk)
+        session = firehose_write.WriteSession(target.out, target.inp, [row for row, _ in batch])
+        session.configure()
+        for row, payload in batch:
+            if row['first_sector'] == fail_at:
+                target.fault = 'final_nak'
+            session.program_next(BytesIO(payload))
+            assert disk.read(row['first_sector'], row['sectors']) == payload
+        assert session.done()
+
+    initial = pending()
+    assert initial[-3][0]['first_sector'] == DISK - gpt.BACKUP_SECTORS
+    assert initial[-2][0]['first_sector'] == 0
+    assert initial[-1][0]['first_sector'] == 64
+    with pytest.raises(firehose_write.WriteFailed, match='没有收到明确的完成 ACK'):
+        send(initial, fail_at=DISK - gpt.BACKUP_SECTORS)
+    with pytest.raises(gpt.GptError):
+        backup.read_layout(disk.read)
+    changed = ranges['tz']['first_sector'] * 512
+    disk.data[changed:changed + 512] = captured['tz'][:512]
+    interrupted = bytes(disk.data)
+    batch = pending()
+    assert [row['first_sector'] for row, _ in batch] == [512, 0, 64]
+    send(batch)
+    assert not pending()
+    assert backup.read_layout(disk.read)[0]['gpt_sha256'] == candidate['gpt_sha256']
+    send(pending(restore=True))
+    assert not pending(restore=True) and bytes(disk.data) == before
+
+    disk.data[:] = interrupted
+    disk.data[changed] = 0 if interrupted[changed] not in (0, 84) else 1
+    with pytest.raises(gpt.GptError, match='未识别扇区'):
+        pending(restore=True)
+    disk.data[:] = interrupted
+    send(pending(restore=True))
     assert bytes(disk.data) == before
 
 

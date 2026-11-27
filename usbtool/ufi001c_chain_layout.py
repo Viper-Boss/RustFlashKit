@@ -206,6 +206,68 @@ def verify_9008(link, candidate_folder, baseline_folder, archive, output):
                                    'items': items, 'writes_performed': False, 'hardware_boot_verified': False})
 
 
+def transition_images(ranges, captured, candidate, staged, primary, alternate):
+    """Overlay candidate bytes on the preimages, preserving each unwritten sector."""
+    require(captured.keys() == ranges.keys(), '缺少回读区段')
+    dest = {name: bytearray(data) for name, data in captured.items()}
+    require(all(len(dest[name]) == row['sectors'] * gpt.SECTOR for name, row in ranges.items()),
+            '回读区段长度不一致')
+    parts = {row['name']: row for row in candidate['partitions']}
+    writes = [(parts[name]['first_sector'], data)
+              for data, targets, _ in staged.values() for name in targets]
+    writes.extend(((ranges['gpt-primary']['first_sector'], primary),
+                   (ranges['gpt-backup']['first_sector'], alternate)))
+    previous_end = 0
+    for first, data in sorted(writes):
+        end = first + len(data) // gpt.SECTOR
+        require(len(data) % gpt.SECTOR == 0 and end > first and first >= previous_end,
+                '候选写入区段未对齐或重叠')
+        previous_end = end
+        remaining = len(data)
+        for name, row in ranges.items():
+            start = row['first_sector']
+            lo, hi = max(first, start), min(end, start + row['sectors'])
+            if lo < hi:
+                offset = (lo - start) * gpt.SECTOR
+                src = (lo - first) * gpt.SECTOR
+                length = (hi - lo) * gpt.SECTOR
+                dest[name][offset:offset + length] = data[src:src + length]
+                remaining -= length
+        require(remaining == 0, '候选写入区段没有完整的回读覆盖')
+    return {name: bytes(data) for name, data in dest.items()}
+
+
+def pending_transition(read, ranges, captured, candidate_images, *, restore=False):
+    """Reconcile a stopped attempt using only sectors equal to the old or new side.
+
+    Return complete range payloads for the selected direction. The ranges stay
+    fixed even if the two on-disk GPT copies now describe different layouts.
+    """
+    require(captured.keys() == ranges.keys() == candidate_images.keys(), '缺少迁移或回读区段')
+    desired = captured if restore else candidate_images
+    # Put the backup GPT before the primary GPT, and defer changing the active SBL1 until last.
+    deferred = ('gpt-backup', 'gpt-primary', 'sbl1')
+    order = [name for name in ranges if name not in deferred] + [name for name in deferred if name in ranges]
+    pending = []
+    for name in order:
+        row = ranges[name]
+        first, count = row['first_sector'], row['sectors']
+        original, target = captured[name], candidate_images[name]
+        require(len(original) == len(target) == count * gpt.SECTOR, f'{name} 区段长度不一致')
+        data = backup.checked_read(read, first, count)
+        require(data == backup.checked_read(read, first, count), f'{name} 当前状态双读不一致')
+        if data == desired[name]:
+            continue
+        if data != original and data != target:
+            for offset in range(0, len(data), gpt.SECTOR):
+                section = slice(offset, offset + gpt.SECTOR)
+                require(data[section] in (original[section], target[section]),
+                        f'{name} 含未识别扇区 {first + offset // gpt.SECTOR}')
+        pending.append(({'first_sector': first, 'sectors': count, 'sha256': hashlib.sha256(desired[name]).hexdigest()},
+                        desired[name]))
+    return pending
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('primary', type=Path)
@@ -241,6 +303,9 @@ def main():
                 return stream.read(count * gpt.SECTOR)
 
             captured = verify_preimages(read, report['rollback_ranges'], original_primary, original_alternate)
+            target = transition_images(report['rollback_ranges'], captured, layout, staged, primary, alternate)
+            report['disk_image_transition'] = [segment for segment, _ in pending_transition(
+                read, report['rollback_ranges'], captured, target)]
         report['disk_image_preimages'] = {name: {'file': 'image-preimages/' + name + '.bin',
                                                'sha256': hashlib.sha256(data).hexdigest()}
                                          for name, data in captured.items()}
