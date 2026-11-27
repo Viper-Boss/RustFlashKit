@@ -7,7 +7,7 @@ import pytest
 
 from conftest import FakeDisk
 from test_write import FakeTarget
-from usbtool import ab_gpt, ab_install, backup, flashpack, gpt, oneclick, storage_layout, writeplan
+from usbtool import ab_gpt, ab_install, backup, flashpack, gpt, oneclick, storage_layout, ufi001c_chain_layout, writeplan
 
 DISK = 8192
 DEVICE = {'chip_ok': True, 'serial': 'aa1234', 'msm_id': '0x7050e1', 'loader_sha256': 'a' * 64}
@@ -124,6 +124,80 @@ def run(folder, disk, phase, *, retry=False, fault=None, device=DEVICE):
     target.max_payload = dict(oneclick.PHASES)[phase]
     return oneclick.run_session(folder, phase, disk.read, target.out, target.inp, device,
                                 log=lambda message: None, retry=retry)
+
+
+def test_ufi001c_stock_arm32_chain_stops_before_any_device_write(installable, monkeypatch):
+    _, folder, _ = installable
+    parts = [("hyp" if name == "rpm" else name, first, last)
+             for name, first, last in source_parts(DISK, 1024, 2048, 64)]
+    disk = FakeDisk(DISK, parts)
+    layout, _, _ = backup.read_layout(disk.read)
+    partitions = {row['name']: row for row in layout['partitions']}
+    pins = []
+    for name in ('hyp', 'tz'):
+        first = partitions[name]['first_sector']
+        start = first * gpt.SECTOR
+        disk.data[start:start + 3] = b'ELF'
+        pins.append((name, 3, hashlib.sha256(b'ELF').hexdigest()))
+        disk.data[start + 3] = 0xFF
+    monkeypatch.setattr(ab_install, 'UFI001C_STOCK_CHAIN', tuple(pins))
+    monkeypatch.setattr(ab_install.board_id, 'identify', lambda *args: {'family': 'UFI001C', 'tag': '', 'date': ''})
+    manifest = dict(flashpack.check_imported(folder), board='ufi001c')
+    before = bytes(disk.data)
+    with pytest.raises(oneclick.FlashStopped, match='原厂引导链.*未写入'):
+        ab_install.run_session(folder, manifest, 'prepare', disk.read, None, None,
+                               DEVICE, None, None, None, 'test', False)
+    assert bytes(disk.data) == before
+    disk.data[partitions['tz']['first_sector'] * gpt.SECTOR] = 0
+    assert not ab_install.has_ufi001c_stock_chain(disk.read, layout)
+
+
+def test_ufi001c_arm64_chain_layout_preserves_unrelated_entries(monkeypatch):
+    parts = [('sbl1', 64, 127), ('aboot', 128, 191), ('boot', 192, 255), ('hyp', 256, 319),
+             ('tz', 512, 1535), ('tzbak', 1536, 2559), ('modemst1', 6144, 6207)]
+    primary, alternate = gpt.build_gpt(DISK, parts)
+    original = writeplan.gpt_entries_by_name(primary)
+    monkeypatch.setattr(ufi001c_chain_layout, 'TZ_TYPE', original['tz'][:16])
+    for occupied in (6144, 4097, 8192):
+        with pytest.raises(gpt.GptError):
+            ufi001c_chain_layout.build(primary, alternate, occupied, 6210)
+    with pytest.raises(gpt.GptError, match='重叠'):
+        ufi001c_chain_layout.build(primary, alternate, 4096, 4100)
+
+    new_primary, new_alt, proof = ufi001c_chain_layout.build(primary, alternate, 4096, 6210)
+    assert new_primary[:512] == primary[:512]
+    assert not proof['write_capable'] and not proof['hardware_boot_verified']
+    assert proof['candidate_gpt_sha256'] == gpt.parse_gpt(new_primary, new_alt, DISK)['gpt_sha256']
+    assert (proof['candidate']['tz']['first_sector'], proof['candidate']['tz']['last_sector']) == (512, 2559)
+    assert (proof['candidate']['tzbak']['first_sector'], proof['candidate']['tzbak']['last_sector']) == (4096, 6143)
+    assert (proof['candidate']['cdt']['first_sector'], proof['candidate']['cdt']['last_sector']) == (6210, 6213)
+    after = writeplan.gpt_entries_by_name(new_primary)
+    assert after['cdt'][:16] == ufi001c_chain_layout.CDT_TYPE
+    for name, row in original.items():
+        if name in {'tz', 'tzbak'}:
+            assert after[name][:32] == row[:32] and after[name][48:] == row[48:]
+        else:
+            assert after[name] == row
+
+
+def test_ufi001c_chain_stages_only_pinned_payloads_that_fit(tmp_path, monkeypatch):
+    payload = b'test TZ image'
+    digest = hashlib.sha256(payload).hexdigest()
+    monkeypatch.setattr(ufi001c_chain_layout, 'OPENSTICK_PAYLOADS', {'tz': ('tz.mbn', len(payload), digest)})
+    archive_path = tmp_path / 'base.zip'
+    with zipfile.ZipFile(archive_path, 'w') as archive:
+        archive.writestr('base/tz.mbn', payload)
+    layout = {'partitions': [{'name': 'tz', 'bytes': 512}, {'name': 'tzbak', 'bytes': 512}]}
+    staged = ufi001c_chain_layout.stage_payloads(archive_path, layout)
+    assert staged == {'tz': (payload.ljust(512, b'\0'), ('tz', 'tzbak'), digest)}
+
+    layout['partitions'][1]['bytes'] = 511
+    with pytest.raises(gpt.GptError, match='tzbak.*容量不足'):
+        ufi001c_chain_layout.stage_payloads(archive_path, layout)
+    with zipfile.ZipFile(archive_path, 'w') as archive:
+        archive.writestr('base/tz.mbn', bytes(len(payload)))
+    with pytest.raises(gpt.GptError, match='文件摘要不匹配'):
+        ufi001c_chain_layout.stage_payloads(archive_path, layout)
 
 
 def test_compressed_pack_must_match_signed_uncompressed_bytes(installable, tmp_path, monkeypatch):

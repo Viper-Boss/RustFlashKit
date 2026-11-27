@@ -16,6 +16,11 @@ from . import ab_gpt, backup, board_id, flashpack, gpt, oneclick, paths, storage
 
 DISK_MARGIN = 200 << 20
 CALIBRATION_NAMES = frozenset({"modemst1", "modemst2", "fsc", "fsg", "sec", "persist"})
+# Hash only the verified ELF extents. Factory copies can have different sector padding.
+UFI001C_STOCK_CHAIN = (
+    ('hyp', 20520, '9f44dba76b1c2d87f98cd02c978ed3a453384653726144327a7f23b439013f0c'),
+    ('tz', 394696, '1abedb3f3adae5595a6ff456ddcd8b8ceae43c87143cedd019174b36e0b74268'),
+)
 
 
 def require(condition, reason):
@@ -74,6 +79,19 @@ def current_aboot_sha256(read, layout, progress, sectors=None):
     return backup.hash_range(read, part['first_sector'], sectors, None, progress, '核对现有引导程序')
 
 
+def has_ufi001c_stock_chain(read, layout):
+    parts = {part['name']: part for part in layout['partitions']}
+    for name, length, expected in UFI001C_STOCK_CHAIN:
+        part = parts.get(name)
+        if part is None or part['bytes'] < length:
+            return False
+        sectors = (length + gpt.SECTOR - 1) // gpt.SECTOR
+        data = backup.checked_read(read, part['first_sector'], sectors)
+        if hashlib.sha256(data[:length]).hexdigest() != expected:
+            return False
+    return True
+
+
 def run_session(pack_dir, manifest, phase, read, ep_out, ep_in, device,
                 log, progress, on_disk_sectors, tool_version, retry):
     serial, loader = device.get('serial'), device.get('loader_sha256')
@@ -84,6 +102,9 @@ def run_session(pack_dir, manifest, phase, read, ep_out, ep_in, device,
     board = board_id.identify(read, layout, progress)
     expected_board = manifest['board'].upper()
     require(board['family'] == expected_board, f'刷机包需要 {expected_board}，实际为 {board_id.describe(board)}，未写入')
+    if expected_board == 'UFI001C':
+        require(not has_ufi001c_stock_chain(read, layout),
+                '识别到已知无法启动此 ARM64 固件的 UFI001C 原厂引导链。需要先迁移引导链，未写入')
     migration = manifest.get('stock_migration') or {}
     accept_unstable = migration.get('unstable_calibration', ())
     if accept_unstable:
