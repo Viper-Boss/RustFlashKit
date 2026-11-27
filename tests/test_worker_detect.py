@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: GPL-3.0-only
+import hashlib
 import json
 from types import SimpleNamespace
+import zipfile
 
 import pytest
 
-from usbtool import detect, policy, worker
+from conftest import FakeDisk
+from usbtool import backup, cli, detect, gpt, policy, ufi001c_chain_layout, worker, writeplan
 
 
 class FakeLink:
@@ -67,6 +70,68 @@ def test_failed_backup_does_not_reset(disk, loader, tmp_path):
     with pytest.raises(Exception):
         worker.run(job, link_factory=lambda *a, **k: link)
     assert link.resets == 0 and link.closed
+
+
+def test_chain_preflight_cli_saves_only_matching_readbacks(loader, tmp_path, monkeypatch):
+    disk = FakeDisk(8192, [('sbl1', 64, 127), ('aboot', 128, 191), ('boot', 192, 255), ('hyp', 256, 319),
+                           ('tz', 512, 1535), ('tzbak', 1536, 2559)])
+    disk.data[4096 * 512:6148 * 512] = bytes(2052 * 512)
+    _, primary, alternate = backup.read_layout(disk.read)
+    monkeypatch.setattr(ufi001c_chain_layout, 'TZ_TYPE', writeplan.gpt_entries_by_name(primary)['tz'][:16])
+    new_primary, new_alternate, _ = ufi001c_chain_layout.build(primary, alternate, 4096, 6144)
+    payload = b'T' * (1183 * 512)
+    digest = hashlib.sha256(payload).hexdigest()
+    monkeypatch.setattr(ufi001c_chain_layout, 'OPENSTICK_PAYLOADS', {'tz': ('tz.mbn', len(payload), digest)})
+    archive = tmp_path / 'base.zip'
+    with zipfile.ZipFile(archive, 'w') as file:
+        file.writestr('base/tz.mbn', payload)
+    candidate = tmp_path / 'candidate'
+    candidate.mkdir()
+    (candidate / 'gpt-primary.candidate.bin').write_bytes(new_primary)
+    (candidate / 'gpt-backup.candidate.bin').write_bytes(new_alternate)
+    (candidate / 'tz.candidate.bin').write_bytes(payload)
+    baseline = tmp_path / 'baseline'
+    baseline.mkdir()
+    (baseline / 'target-gpt-primary.bin').write_bytes(primary)
+    (baseline / 'target-gpt-backup.bin').write_bytes(alternate)
+    (baseline / 'tz.bin').write_bytes(disk.read(512, 1024))
+    (baseline / 'tzbak.bin').write_bytes(disk.read(1536, 1024))
+    output = tmp_path / 'readback'
+    monkeypatch.setitem(policy.KNOWN_LOADERS, backup.file_sha256(loader), 'test')
+    monkeypatch.setattr(detect, 'usb_candidates', lambda: [{'port': '1-2'}])
+    links = []
+
+    def connect(*args, **kwargs):
+        assert 'write_payload' not in kwargs
+        link = FakeLink(disk)
+        links.append(link)
+        return link
+
+    def run_job(job, timeout):
+        assert timeout == cli.PROBE_TIMEOUT
+        worker.run(job, link_factory=connect)
+        return 0
+
+    monkeypatch.setattr(cli, '_run_job', run_job)
+    args = ['chain-preflight', '--candidate', str(candidate), '--baseline', str(baseline), '--openstick-base',
+            str(archive), '--loader', str(loader), '--output', str(output)]
+    (candidate / 'tz.candidate.bin').write_bytes(b'tampered')
+    disk.reads.clear()
+    with pytest.raises(gpt.GptError, match='候选镜像与原始输入不一致'):
+        cli.main(args)
+    assert not disk.reads and not output.exists()
+    (candidate / 'tz.candidate.bin').write_bytes(payload)
+    disk.data[512 * 512] ^= 1
+    with pytest.raises(gpt.GptError, match='实机引导镜像与所存副本不一致'):
+        cli.main(args)
+    assert not output.exists()
+    disk.data[512 * 512] ^= 1
+    assert cli.main(args) == 0
+    assert all(link.closed and link.resets == 0 for link in links)
+    receipt = json.loads((output / 'manifest.json').read_text())
+    assert receipt['writes_performed'] is False and receipt['hardware_boot_verified'] is False
+    assert receipt['items']['gap-tzbak']['must_be_zero']
+    assert receipt['items']['tz']['sha256'] == backup.file_sha256(baseline / 'tz.bin')
 
 
 def test_unknown_loader_refused_without_confirmation(disk, loader):

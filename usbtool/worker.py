@@ -5,6 +5,7 @@
 """
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 import threading
@@ -14,7 +15,7 @@ import traceback
 from . import ab_gpt, backup, board_id, gpt, paths, policy, storage_layout
 
 PREFIX = '@@USBTOOL '
-ACTIONS = ('probe', 'backup', 'write', 'storage', 'flash')
+ACTIONS = ('probe', 'backup', 'write', 'storage', 'flash', 'chain-preflight')
 # 看门狗时限（秒）：连接阶段为整体上限；读取阶段为“多久没有任何进展”的上限。
 CONNECT_LIMIT = 90
 STALL_LIMIT = 120
@@ -114,6 +115,11 @@ def validate_job(job):
             raise ValueError('写入任务不允许自动重启设备')
         if not all(isinstance(job.get(k), str) and job.get(k) for k in ('plan', 'step', 'confirm')):
             raise ValueError('写入任务需要计划文件、步骤名和确认摘要')
+    if job['action'] == 'chain-preflight':
+        if job['mode'] != 'usb' or job.get('reset_after') or job.get('allow_unknown_loader'):
+            raise ValueError('UFI001C 引导链回读仅使用已知加载器的 USB 只读会话')
+        if not all(isinstance(job.get(k), str) and job[k] for k in ('candidate', 'baseline', 'openstick_base', 'output')):
+            raise ValueError('引导链回读需要候选目录、原始回读目录、OpenStick 基础包和输出目录')
 
 
 def run(job, link_factory=None):
@@ -170,6 +176,13 @@ def run(job, link_factory=None):
         elif job['action'] == 'storage':
             from . import emmc_life
             emit('result', action='storage', report=emmc_life.from_firehose(link.storage_info()))
+        elif job['action'] == 'chain-preflight':
+            from . import ufi001c_chain_layout
+            if device.get('chip_ok') is not True:
+                raise ValueError('未通过本次 Sahara 核对 MSM8916 芯片型号，停止回读')
+            ufi001c_chain_layout.verify_9008(link, Path(job['candidate']), Path(job['baseline']),
+                                           Path(job['openstick_base']), Path(job['output']))
+            emit('result', action='chain-preflight', folder=job['output'])
         elif job['action'] == 'probe':
             layout, primary, _backup = backup.read_layout(link.read, link.set_disk_sectors)
             header = gpt.parse_header(primary[gpt.SECTOR:2 * gpt.SECTOR], 1)

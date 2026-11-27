@@ -144,16 +144,66 @@ def rollback_ranges(source, candidate, staged):
 
 def verify_preimages(read, ranges, original_primary, original_alternate):
     """Collect stable preimages through the same sector reader used by EDL."""
-    captured = {name: backup.checked_read(read, row['first_sector'], row['sectors'])
-                for name, row in ranges.items()}
+    def read_range(name):
+        row = ranges[name]
+        return backup.checked_read(read, row['first_sector'], row['sectors'])
+
+    captured = {name: read_range(name) for name in ('gpt-primary', 'gpt-backup')}
     require(captured['gpt-primary'] == original_primary and captured['gpt-backup'] == original_alternate,
             '本次回读的主备 GPT 与迁移来源不一致')
+    for name in ranges:
+        if name not in captured:
+            captured[name] = read_range(name)
     for name, row in ranges.items():
         data = captured[name]
-        require(data == backup.checked_read(read, row['first_sector'], row['sectors']), f'{name} 两次读取不一致')
+        require(data == read_range(name), f'{name} 两次读取不一致')
         if row['must_be_zero']:
             require(data == bytes(len(data)), f'{name} 内有数据')
     return captured
+
+
+def verify_9008(link, candidate_folder, baseline_folder, archive, output):
+    """Rebuild the candidate from pinned inputs, then verify and save live preimages."""
+    original_primary = (baseline_folder / 'target-gpt-primary.bin').read_bytes()
+    original_alternate = (baseline_folder / 'target-gpt-backup.bin').read_bytes()
+    primary = (candidate_folder / 'gpt-primary.candidate.bin').read_bytes()
+    alternate = (candidate_folder / 'gpt-backup.candidate.bin').read_bytes()
+    disk = gpt.disk_sectors_from_primary(original_primary)
+    source = gpt.parse_gpt(original_primary, original_alternate, disk)
+    candidate = gpt.parse_gpt(primary, alternate, disk)
+    parts = {row['name']: row for row in candidate['partitions']}
+    require({'tzbak', 'cdt'} <= parts.keys(), '候选缺少备用 TZ 或 CDT')
+    rebuilt_primary, rebuilt_alternate, _ = build(original_primary, original_alternate,
+                                                   parts['tzbak']['first_sector'], parts['cdt']['first_sector'])
+    require((primary, alternate) == (rebuilt_primary, rebuilt_alternate), '候选 GPT 与原始输入重算结果不一致')
+    staged = stage_payloads(archive, candidate)
+    for name, (data, _, _) in staged.items():
+        require((candidate_folder / (name + '.candidate.bin')).read_bytes() == data, f'{name} 候选镜像与原始输入不一致')
+    ranges = rollback_ranges(source, candidate, staged)
+    require(all(row['sectors'] <= ARM64_TZ_SECTORS for row in ranges.values()), '回读区段长度超出当前板型范围')
+    require(not output.exists(), '现场回读目录已存在')
+
+    baseline = {name: (baseline_folder / (name + '.bin')).read_bytes()
+                for name, row in ranges.items() if not row['must_be_zero'] and not name.startswith('gpt-')}
+    require(all(len(data) == ranges[name]['sectors'] * gpt.SECTOR for name, data in baseline.items()),
+            '原始引导镜像长度与对应分区不一致')
+    link.set_disk_sectors(disk)
+    captured = verify_preimages(link.read, ranges, original_primary, original_alternate)
+    for name, data in baseline.items():
+        require(captured[name] == data, f'{name} 实机引导镜像与所存副本不一致')
+
+    output.mkdir(mode=0o700)
+    items = {}
+    for name, data in captured.items():
+        path = output / (name + '.bin')
+        backup._write_new(path, data)
+        digest = hashlib.sha256(data).hexdigest()
+        require(backup.file_sha256(path) == digest, f'{name} 本地回读文件摘要不一致')
+        items[name] = dict(ranges[name], file=path.name, sha256=digest)
+    backup.write_manifest(output, {'kind': 'ufi001c-9008-read-only-preflight',
+                                   'source_gpt_sha256': source['gpt_sha256'],
+                                   'candidate_gpt_sha256': candidate['gpt_sha256'],
+                                   'items': items, 'writes_performed': False, 'hardware_boot_verified': False})
 
 
 def main():

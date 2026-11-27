@@ -63,6 +63,8 @@ def _pump(proc, code):
             elif event['action'] == 'write':
                 code = 0 if event['passed'] else 1
                 print(f'\n写入步骤结束：{event["status"]}（报告：{event["folder"]}；未自动重启设备）')
+            elif event['action'] == 'chain-preflight':
+                print(f'\nUFI001C 原始分区和空档已回读核对（报告：{event["folder"]}）')
             else:
                 print(f'\n备份完成：{event["folder"]}')
         elif kind == 'error':
@@ -175,6 +177,12 @@ def main(argv):
     life.add_argument('--allow-unknown-loader', action='store_true')
     life.add_argument('--mode', choices=('serial', 'usb'))
     life.add_argument('--port', default='')
+    chain = sub.add_parser('chain-preflight', help='只读核对 UFI001C ARM64 引导迁移的 9008 实机回读')
+    chain.add_argument('--candidate', required=True, type=Path, help='离线迁移候选目录')
+    chain.add_argument('--baseline', required=True, type=Path, help='该棒子原有 GPT 和引导镜像目录')
+    chain.add_argument('--openstick-base', required=True, type=Path, help='生成候选时使用的 OpenStick v1 基础包')
+    chain.add_argument('--output', required=True, type=Path, help='保存现场回读的新目录')
+    chain.add_argument('--loader', help='默认用 exe 内置的加载器')
     k = sub.add_parser('pack-keygen', help='生成刷机包签名密钥（不覆盖已有文件）')
     k.add_argument('--key', required=True)
     c = sub.add_parser('pack-create', help='生成并签名刷机包')
@@ -232,6 +240,22 @@ def main(argv):
         for n in notes:
             print('提示：' + n)
         return 0 if devices else 1
+    if args.command == 'chain-preflight':
+        try:
+            devices = detect.usb_candidates()
+        except (OSError, ImportError) as err:
+            print(f'错误：{err}', file=sys.stderr)
+            return 1
+        if len(devices) != 1:
+            print(f'需要恰好一个可用的 9008 USB 设备，现在找到 {len(devices)} 个', file=sys.stderr)
+            return 1
+        loader = args.loader or edl_link.default_loader()
+        if not loader:
+            print('错误：这个版本没有内置加载器，请用 --loader 提供', file=sys.stderr)
+            return 1
+        job = {name: str(getattr(args, name).absolute()) for name in ('candidate', 'baseline', 'openstick_base', 'output')}
+        job.update(action='chain-preflight', mode='usb', port=devices[0]['port'], loader=os.path.abspath(loader))
+        return _run_job(job, PROBE_TIMEOUT)
     if args.command == 'pack-keygen':
         print('公钥：' + flashpack.generate_key(args.key))
         return 0
